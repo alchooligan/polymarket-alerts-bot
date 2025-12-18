@@ -8,7 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 from config import TELEGRAM_BOT_TOKEN, CHECK_INTERVAL_MINUTES
-from polymarket import get_unique_events
+from polymarket import get_unique_events, get_popular_markets
 from database import init_database, get_or_create_user, toggle_user_setting
 from scheduler import start_scheduler, stop_scheduler, run_manual_cycle
 
@@ -48,11 +48,11 @@ Let's get started! Try /markets to see what's trending."""
 
 async def markets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /markets command - show 5 top markets by volume."""
-    await update.message.reply_text("Fetching latest markets...")
+    await update.message.reply_text("Fetching top markets...")
 
     try:
-        # Fetch unique events (deduplicated, sorted by volume)
-        events = await get_unique_events(limit=100, include_spam=False)
+        # Fetch popular markets (sorted by volume from API)
+        events = await get_popular_markets(limit=100, include_spam=False)
 
         if not events:
             await update.message.reply_text("No markets found. Try again later.")

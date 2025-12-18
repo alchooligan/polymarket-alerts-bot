@@ -20,8 +20,8 @@ from config import (
 
 async def fetch_recent_events(limit: int = 100, closed: bool = False) -> list[dict]:
     """
-    Fetch recent events from Polymarket.
-    Events contain markets (outcomes you can bet on).
+    Fetch recent events from Polymarket (sorted by recency).
+    Used for new market alerts.
 
     Args:
         limit: Maximum number of events to fetch
@@ -44,6 +44,35 @@ async def fetch_recent_events(limit: int = 100, closed: bool = False) -> list[di
             return response.json()
     except httpx.HTTPError as e:
         print(f"Error fetching events: {e}")
+        return []
+
+
+async def fetch_popular_events(limit: int = 100, closed: bool = False) -> list[dict]:
+    """
+    Fetch popular events from Polymarket (sorted by volume).
+    Used for /markets command to show interesting markets.
+
+    Args:
+        limit: Maximum number of events to fetch
+        closed: Whether to include closed markets
+
+    Returns:
+        List of event dictionaries
+    """
+    params = {
+        "order": "volume",
+        "ascending": "false",
+        "closed": str(closed).lower(),
+        "limit": limit,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(EVENTS_ENDPOINT, params=params)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        print(f"Error fetching popular events: {e}")
         return []
 
 
@@ -308,6 +337,55 @@ async def get_unique_events(limit: int = 100, include_spam: bool = False) -> lis
                     event_map[slug]["yes_price"] = market["yes_price"]
 
     # Convert to list and sort by volume descending
+    unique_events = list(event_map.values())
+    unique_events.sort(key=lambda x: x["total_volume"], reverse=True)
+
+    return unique_events
+
+
+async def get_popular_markets(limit: int = 100, include_spam: bool = False) -> list[dict]:
+    """
+    Fetch POPULAR markets (by volume) and deduplicate by event.
+    Used for /markets command to show high-volume, interesting markets.
+
+    Args:
+        limit: Maximum number of events to fetch
+        include_spam: Whether to include price prediction spam
+
+    Returns:
+        List of unique event dictionaries, sorted by volume desc
+    """
+    # Use popular events (sorted by volume from API)
+    events = await fetch_popular_events(limit=limit)
+
+    # Group markets by event slug
+    event_map = {}
+
+    for event in events:
+        markets = extract_market_info(event)
+
+        for market in markets:
+            # Skip spam unless requested
+            if not include_spam and market["is_spam"]:
+                continue
+
+            slug = market["slug"]
+
+            if slug not in event_map:
+                event_map[slug] = {
+                    "title": market["title"],
+                    "slug": slug,
+                    "yes_price": market["yes_price"],
+                    "total_volume": market["volume"],
+                    "tags": market["tags"],
+                    "end_date": market["end_date"],
+                }
+            else:
+                event_map[slug]["total_volume"] += market["volume"]
+                if market["yes_price"] > event_map[slug]["yes_price"]:
+                    event_map[slug]["yes_price"] = market["yes_price"]
+
+    # Convert to list (already sorted by volume from API, but re-sort to be safe)
     unique_events = list(event_map.values())
     unique_events.sort(key=lambda x: x["total_volume"], reverse=True)
 
