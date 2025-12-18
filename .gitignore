@@ -1,0 +1,33 @@
+# Environment variables (contains bot token)
+.env
+
+# Database (local data, Railway uses ephemeral storage)
+*.db
+bot_data.db
+
+# Windows reserved names
+nul
+NUL
+
+# Claude Code settings (local only)
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
