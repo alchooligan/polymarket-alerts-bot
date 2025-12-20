@@ -18,6 +18,7 @@ from database import (
     update_volume_baselines_bulk,
     is_volume_seeded,
     mark_volume_seeded,
+    get_volume_deltas_bulk,
 )
 
 logger = logging.getLogger(__name__)
@@ -64,16 +65,22 @@ async def check_price_movements(
     limit: int = 100,
     threshold: float = None,
     hours: int = 1,
-    save_snapshots: bool = True
+    save_snapshots: bool = True,
+    min_volume: float = 5000,
+    min_volume_delta: float = 2000,
 ) -> list[dict]:
     """
-    Check for markets with significant price movements.
+    Check for markets with significant price movements WITH volume confirmation.
+
+    Phase 2: Only alert if price move has real volume behind it.
 
     Args:
         limit: Max events to fetch from API
         threshold: Minimum % change to alert (default: BIG_MOVE_THRESHOLD from config)
         hours: How far back to compare prices
         save_snapshots: If True, save current prices as new snapshots
+        min_volume: Minimum total volume required ($5K default)
+        min_volume_delta: Minimum volume change in last hour ($2K default)
 
     Returns:
         List of dicts with market info and price change details
@@ -84,12 +91,18 @@ async def check_price_movements(
     # Fetch current markets
     events = await get_unique_events(limit=limit, include_spam=False)
 
+    # Get volume deltas for confirmation
+    slugs = [e.get("slug") for e in events if e.get("slug")]
+    volume_deltas = get_volume_deltas_bulk(slugs, hours=1)
+
     big_moves = []
     events_to_snapshot = []
+    candidates = 0  # Track how many passed price threshold but failed volume
 
     for event in events:
         slug = event.get("slug")
         current_price = event.get("yes_price", 0)
+        total_volume = event.get("total_volume", 0)
 
         if not slug:
             continue
@@ -103,18 +116,37 @@ async def check_price_movements(
 
             # Check if it exceeds threshold (absolute value)
             if abs(change) >= threshold:
-                big_moves.append({
-                    "title": event.get("title"),
-                    "slug": slug,
-                    "old_price": old_price,
-                    "new_price": current_price,
-                    "change": change,
-                    "total_volume": event.get("total_volume", 0),
-                    "tags": event.get("tags", []),
-                })
+                candidates += 1
+
+                # VOLUME CONFIRMATION (Phase 2)
+                # Large markets ($500K+): price move alone is signal
+                # Small/medium markets: need volume + delta confirmation
+                volume_delta = volume_deltas.get(slug, 0)
+                large_market_threshold = 500_000
+
+                passes_confirmation = (
+                    total_volume >= large_market_threshold or  # Large market exception
+                    (total_volume >= min_volume and volume_delta >= min_volume_delta)  # Standard confirmation
+                )
+
+                if passes_confirmation:
+                    big_moves.append({
+                        "title": event.get("title"),
+                        "slug": slug,
+                        "old_price": old_price,
+                        "new_price": current_price,
+                        "change": change,
+                        "total_volume": total_volume,
+                        "volume_delta": volume_delta,
+                        "tags": event.get("tags", []),
+                    })
 
         # Track for snapshot saving
         events_to_snapshot.append(event)
+
+    # Log filtering stats
+    if candidates > 0:
+        logger.info(f"Big moves: {candidates} candidates, {len(big_moves)} passed volume confirmation")
 
     # Save current prices as new snapshots
     if save_snapshots and events_to_snapshot:
@@ -155,6 +187,7 @@ def format_price_move_alert(move: dict) -> str:
     new_price = move.get("new_price", 0)
     change = move.get("change", 0)
     volume = move.get("total_volume", 0)
+    volume_delta = move.get("volume_delta", 0)
     slug = move.get("slug", "")
 
     # Format volume
@@ -165,6 +198,12 @@ def format_price_move_alert(move: dict) -> str:
     else:
         volume_str = f"${volume:.0f}"
 
+    # Format volume delta
+    if volume_delta >= 1_000:
+        delta_str = f"+${volume_delta / 1_000:.1f}K/hr"
+    else:
+        delta_str = f"+${volume_delta:.0f}/hr"
+
     # Format change with sign
     change_str = f"+{change:.0f}%" if change > 0 else f"{change:.0f}%"
 
@@ -172,7 +211,7 @@ def format_price_move_alert(move: dict) -> str:
 
 - {title}
   YES: {old_price:.0f}% -> {new_price:.0f}% ({change_str})
-  Volume: {volume_str}
+  Volume: {volume_str} ({delta_str})
   polymarket.com/event/{slug}"""
 
 
