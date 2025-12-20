@@ -18,8 +18,10 @@ from database import (
     add_to_watchlist,
     remove_from_watchlist,
     get_watchlist,
+    get_recently_seen_slugs,
 )
 from scheduler import start_scheduler, stop_scheduler, run_manual_cycle, run_daily_digest
+from alerts import check_underdog_alerts, format_bundled_underdogs, filter_sports, _format_volume
 
 # Set up logging
 logging.basicConfig(
@@ -38,22 +40,29 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     welcome_message = """Welcome to Polymarket Alerts Bot!
 
 I'll help you track prediction markets on Polymarket.
+Sports markets are filtered out (no edge there).
 
-Commands:
-/top - Top markets by volume
-/discover - Markets waking up (velocity)
-/watch <slug> - Watch a specific market
-/watchlist - See your watched markets
-/settings - Configure alerts
+On-demand commands:
+/top - Biggest markets by volume
+/hot - Fastest moving (velocity)
+/hot 24h - Velocity over 24 hours
+/new - Markets added in last 24h
+/underdogs - YES <20% with action
+/discover - Rising markets
+
+Watchlist:
+/watch <slug> - Track a market
+/watchlist - Your tracked markets
+
+Settings:
+/settings - Toggle push alerts
 /checknow - Manual scan
 
-Alerts every 5 min:
-• Volume milestones ($10K→$1M)
-• Velocity (money flowing fast)
-• Price moves (10%+)
-• Watchlist updates
-
-Try /top for giants, /discover for rising."""
+Push alerts (every 5 min):
+• Volume milestones ($100K+)
+• Discoveries (new + $25K+)
+• Closing soon (<12h)
+• Watchlist moves (5%+)"""
 
     await update.message.reply_text(welcome_message)
 
@@ -198,19 +207,239 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.message.reply_text(f"Error: {e}")
 
 
+async def underdogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle the /underdogs command - show contrarian plays.
+    Markets with YES <20% but significant velocity relative to their size.
+    """
+    await update.message.reply_text("Finding underdogs...")
+
+    try:
+        # Get underdogs with new smart logic
+        underdogs = await check_underdog_alerts(target_count=500)
+
+        if not underdogs:
+            await update.message.reply_text(
+                "No underdogs found right now.\n\n"
+                "Underdogs require: YES < 20%, volume >= $10K, and\n"
+                "velocity >= 10% of total volume (significant action)."
+            )
+            return
+
+        # Format and send
+        message = format_bundled_underdogs(underdogs)
+        await update.message.reply_text(message, disable_web_page_preview=True)
+
+    except Exception as e:
+        logger.error(f"Error in underdogs: {e}")
+        await update.message.reply_text(f"Error: {e}")
+
+
+async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle the /hot command - show markets by velocity (money moving fast).
+    Usage: /hot [1h|6h|24h] - defaults to 1h
+    """
+    # Parse time window from args
+    hours = 1
+    time_label = "1h"
+
+    if context.args:
+        arg = context.args[0].lower()
+        if arg in ["6h", "6"]:
+            hours = 6
+            time_label = "6h"
+        elif arg in ["24h", "24"]:
+            hours = 24
+            time_label = "24h"
+
+    await update.message.reply_text(f"Finding hottest markets ({time_label})...")
+
+    try:
+        # Fetch markets
+        events = await get_all_markets_paginated(target_count=500, include_spam=False)
+
+        if not events:
+            await update.message.reply_text("No markets found. Try again later.")
+            return
+
+        # Filter out sports
+        events = filter_sports(events)
+
+        # Get volume deltas for specified time window
+        slugs = [e.get("slug") for e in events if e.get("slug")]
+        deltas = get_volume_deltas_bulk(slugs, hours=hours)
+
+        if not deltas:
+            await update.message.reply_text(
+                f"No velocity data for {time_label} window yet.\n"
+                "Need more snapshots to accumulate. Try /checknow."
+            )
+            return
+
+        # Build list with deltas
+        hot_markets = []
+        for event in events:
+            slug = event.get("slug")
+            if slug in deltas and deltas[slug] > 0:
+                velocity = deltas[slug]
+                # For multi-hour windows, normalize to per-hour rate
+                velocity_per_hour = velocity / hours if hours > 1 else velocity
+
+                hot_markets.append({
+                    **event,
+                    "velocity": velocity,
+                    "velocity_per_hour": velocity_per_hour,
+                })
+
+        # Sort by velocity (highest first)
+        hot_markets.sort(key=lambda x: x["velocity"], reverse=True)
+
+        if not hot_markets:
+            await update.message.reply_text(
+                f"No markets with positive velocity in last {time_label}.\n"
+                "Markets may be quiet right now."
+            )
+            return
+
+        # Format top 20
+        lines = [f"Hottest Markets ({time_label})", ""]
+
+        for i, m in enumerate(hot_markets[:20], 1):
+            title = m.get("title", "Unknown")[:40]
+            velocity = m["velocity"]
+            velocity_per_hour = m["velocity_per_hour"]
+            total_volume = m.get("total_volume", 0)
+            yes_price = m.get("yes_price", 0)
+            slug = m.get("slug", "")
+
+            # Format velocity
+            if hours > 1:
+                # Show total delta and per-hour rate
+                if velocity >= 1000:
+                    vel_str = f"+${velocity/1000:.0f}K"
+                else:
+                    vel_str = f"+${velocity:.0f}"
+                if velocity_per_hour >= 1000:
+                    rate_str = f"(${velocity_per_hour/1000:.1f}K/hr)"
+                else:
+                    rate_str = f"(${velocity_per_hour:.0f}/hr)"
+                vel_display = f"{vel_str} {rate_str}"
+            else:
+                if velocity >= 1000:
+                    vel_display = f"+${velocity/1000:.0f}K/hr"
+                else:
+                    vel_display = f"+${velocity:.0f}/hr"
+
+            vol_str = _format_volume(total_volume)
+
+            lines.append(f"{i}. {title}")
+            lines.append(f"   {vel_display} | Total: {vol_str} | YES: {yes_price:.0f}%")
+            lines.append(f"   polymarket.com/event/{slug}")
+            lines.append("")
+
+        message = "\n".join(lines).strip()
+        await update.message.reply_text(message, disable_web_page_preview=True)
+
+    except Exception as e:
+        logger.error(f"Error in hot: {e}")
+        await update.message.reply_text(f"Error: {e}")
+
+
+async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle the /new command - show markets first seen recently.
+    Usage: /new [24h|48h] - defaults to 24h
+    """
+    # Parse time window from args
+    hours = 24
+    time_label = "24h"
+
+    if context.args:
+        arg = context.args[0].lower()
+        if arg in ["48h", "48"]:
+            hours = 48
+            time_label = "48h"
+
+    await update.message.reply_text(f"Finding new markets (last {time_label})...")
+
+    try:
+        # Get recently seen slugs from database
+        recent = get_recently_seen_slugs(hours=hours)
+
+        if not recent:
+            await update.message.reply_text(
+                f"No new markets in the last {time_label}.\n"
+                "Run /checknow to scan for new ones."
+            )
+            return
+
+        # Get current market data for these slugs
+        events = await get_all_markets_paginated(target_count=500, include_spam=False)
+        events = filter_sports(events)
+
+        # Build lookup
+        event_map = {e.get("slug"): e for e in events}
+
+        # Enrich recent markets with current data
+        new_markets = []
+        for r in recent:
+            slug = r.get("event_slug")
+            if slug in event_map:
+                event = event_map[slug]
+                new_markets.append({
+                    "slug": slug,
+                    "title": event.get("title", r.get("title", "Unknown")),
+                    "total_volume": event.get("total_volume", 0),
+                    "yes_price": event.get("yes_price", 0),
+                    "first_seen_at": r.get("first_seen_at"),
+                })
+
+        if not new_markets:
+            await update.message.reply_text(
+                f"No new markets (non-sports) in the last {time_label}."
+            )
+            return
+
+        # Sort by volume (highest first)
+        new_markets.sort(key=lambda x: x["total_volume"], reverse=True)
+
+        # Format top 20
+        lines = [f"New Markets (last {time_label})", ""]
+
+        for i, m in enumerate(new_markets[:20], 1):
+            title = m.get("title", "Unknown")[:40]
+            total_volume = m.get("total_volume", 0)
+            yes_price = m.get("yes_price", 0)
+            slug = m.get("slug", "")
+
+            vol_str = _format_volume(total_volume)
+
+            lines.append(f"{i}. {title}")
+            lines.append(f"   Volume: {vol_str} | YES: {yes_price:.0f}%")
+            lines.append(f"   polymarket.com/event/{slug}")
+            lines.append("")
+
+        if len(new_markets) > 20:
+            lines.append(f"+{len(new_markets) - 20} more new markets")
+
+        message = "\n".join(lines).strip()
+        await update.message.reply_text(message, disable_web_page_preview=True)
+
+    except Exception as e:
+        logger.error(f"Error in new: {e}")
+        await update.message.reply_text(f"Error: {e}")
+
+
 def build_settings_keyboard(user: dict) -> InlineKeyboardMarkup:
     """Build the settings inline keyboard based on user preferences."""
-    new_markets_status = "ON" if user.get("new_markets_enabled") else "OFF"
-    big_moves_status = "ON" if user.get("big_moves_enabled") else "OFF"
+    alerts_enabled = user.get("new_markets_enabled", False)
+    alerts_status = "ON" if alerts_enabled else "OFF"
 
     keyboard = [
         [InlineKeyboardButton(
-            f"New Markets: {new_markets_status}",
+            f"Push Alerts: {alerts_status}",
             callback_data="toggle_new_markets"
-        )],
-        [InlineKeyboardButton(
-            f"Big Moves (10%+): {big_moves_status}",
-            callback_data="toggle_big_moves"
         )],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -223,7 +452,16 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     text = """Alert Settings
 
-Toggle which alerts you want to receive:"""
+Push alerts include:
+• Volume milestones ($100K+)
+• Discoveries (new markets with $25K+)
+• Closing soon (<12h with action)
+• Watchlist price moves (5%+)
+
+On-demand commands (no toggle needed):
+• /hot - velocity leaders
+• /underdogs - contrarian plays
+• /top - biggest markets"""
 
     keyboard = build_settings_keyboard(user)
     await update.message.reply_text(text, reply_markup=keyboard)
@@ -237,16 +475,11 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     telegram_user = update.effective_user
     callback_data = query.data
 
-    # Toggle the appropriate setting
+    # Toggle alerts
     if callback_data == "toggle_new_markets":
         new_value = toggle_user_setting(telegram_user.id, "new_markets_enabled")
         status = "ON" if new_value else "OFF"
-        logger.info(f"User {telegram_user.id} toggled new_markets to {status}")
-
-    elif callback_data == "toggle_big_moves":
-        new_value = toggle_user_setting(telegram_user.id, "big_moves_enabled")
-        status = "ON" if new_value else "OFF"
-        logger.info(f"User {telegram_user.id} toggled big_moves to {status}")
+        logger.info(f"User {telegram_user.id} toggled alerts to {status}")
 
     # Refresh the keyboard with updated settings
     user = get_or_create_user(telegram_user.id, telegram_user.username)
@@ -254,7 +487,16 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     text = """Alert Settings
 
-Toggle which alerts you want to receive:"""
+Push alerts include:
+• Volume milestones ($100K+)
+• Discoveries (new markets with $25K+)
+• Closing soon (<12h with action)
+• Watchlist price moves (5%+)
+
+On-demand commands (no toggle needed):
+• /hot - velocity leaders
+• /underdogs - contrarian plays
+• /top - biggest markets"""
 
     await query.edit_message_text(text, reply_markup=keyboard)
 
@@ -475,16 +717,15 @@ async def checknow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Build informative response
         response = f"""Scan complete
 
-Scanned ~{stats['markets_scanned']} markets
-• {stats['milestones']} volume milestones
-• {stats['discoveries']} discoveries (launched big)
-• {stats['velocity']} velocity ($5K+/hr)
-• {stats['underdogs']} underdogs (YES<20% + action)
-• {stats['closing_soon']} closing soon (24h)
-• {stats['big_moves']} big price moves
-• {stats['watchlist']} watchlist (5%+ moves)
+Scanned ~{stats['markets_scanned']} markets (sports excluded)
+• {stats['milestones']} volume milestones ($100K+)
+• {stats['discoveries']} discoveries (new + $25K+)
+• {stats['closing_soon']} closing soon (<12h)
+• {stats['watchlist']} watchlist moves (5%+)
 
-Alerts sent: {stats['alerts_sent']}"""
+Alerts sent: {stats['alerts_sent']}
+
+Use /hot for velocity, /underdogs for contrarian plays"""
 
         await update.message.reply_text(response)
     except Exception as e:
@@ -514,6 +755,9 @@ async def main() -> None:
     application.add_handler(CommandHandler("top", top_command))
     application.add_handler(CommandHandler("markets", top_command))  # Alias for backwards compatibility
     application.add_handler(CommandHandler("discover", discover_command))
+    application.add_handler(CommandHandler("underdogs", underdogs_command))
+    application.add_handler(CommandHandler("hot", hot_command))
+    application.add_handler(CommandHandler("new", new_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("checknow", checknow_command))
     application.add_handler(CommandHandler("debug", debug_command))

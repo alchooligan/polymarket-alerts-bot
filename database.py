@@ -330,6 +330,30 @@ def get_unseen_slugs(event_slugs: list[str], telegram_id: int = None) -> list[st
     return [slug for slug in event_slugs if slug not in seen]
 
 
+def get_recently_seen_slugs(hours: int = 24) -> list[dict]:
+    """
+    Get markets that were first seen within the last N hours.
+    Returns list of dicts with slug, title, first_seen_at.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT event_slug, title, first_seen_at
+        FROM seen_markets
+        WHERE telegram_id IS NULL
+        AND first_seen_at >= datetime('now', ?)
+        ORDER BY first_seen_at DESC
+        """,
+        (f"-{hours} hours",)
+    )
+
+    results = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return results
+
+
 # ============================================
 # Price snapshot functions (for big move alerts)
 # ============================================

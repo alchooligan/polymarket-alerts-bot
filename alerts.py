@@ -4,7 +4,16 @@ Detects volume milestones, price movements, and new markets.
 """
 
 import logging
-from config import BIG_MOVE_THRESHOLD, VOLUME_THRESHOLDS, VELOCITY_THRESHOLDS
+from config import (
+    BIG_MOVE_THRESHOLD,
+    VOLUME_THRESHOLDS,
+    VELOCITY_THRESHOLDS,
+    DISCOVERY_MIN_VOLUME,
+    CLOSING_SOON_HOURS,
+    CLOSING_SOON_MIN_VELOCITY,
+    SPORTS_SLUG_PATTERNS,
+    SPORTS_TITLE_KEYWORDS,
+)
 from polymarket import get_unique_events, get_popular_markets, get_all_markets_paginated
 from database import (
     is_market_seen,
@@ -22,6 +31,32 @@ from database import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def is_sports_market(event: dict) -> bool:
+    """
+    Check if a market is sports/esports related.
+    These are excluded because there's no information edge on sports betting.
+    """
+    slug = event.get("slug", "").lower()
+    title = event.get("title", "")
+
+    # Check slug patterns
+    for pattern in SPORTS_SLUG_PATTERNS:
+        if pattern.lower() in slug:
+            return True
+
+    # Check title keywords
+    for keyword in SPORTS_TITLE_KEYWORDS:
+        if keyword.lower() in title.lower():
+            return True
+
+    return False
+
+
+def filter_sports(events: list[dict]) -> list[dict]:
+    """Filter out sports/esports markets from a list."""
+    return [e for e in events if not is_sports_market(e)]
 
 
 async def check_new_markets(
@@ -289,7 +324,7 @@ async def check_volume_milestones(
     target_count: int = 500,
     thresholds: list[int] = None,
     record: bool = True,
-    min_discovery_volume: int = 10_000,
+    min_discovery_volume: int = None,
 ) -> tuple[list[dict], list[dict]]:
     """
     Check for markets that have ACTUALLY crossed volume thresholds.
@@ -309,6 +344,8 @@ async def check_volume_milestones(
     """
     if thresholds is None:
         thresholds = VOLUME_THRESHOLDS
+    if min_discovery_volume is None:
+        min_discovery_volume = DISCOVERY_MIN_VOLUME
 
     # Check if we need to seed first
     if not is_volume_seeded():
@@ -322,6 +359,9 @@ async def check_volume_milestones(
         target_count=target_count,
         include_spam=False
     )
+
+    # Filter out sports markets (no edge on sports betting)
+    events = filter_sports(events)
 
     # Get all slugs for bulk baseline lookup
     slugs = [e.get("slug") for e in events if e.get("slug")]
@@ -590,16 +630,20 @@ def format_bundled_big_moves(moves: list[dict]) -> str:
 async def check_underdog_alerts(
     target_count: int = 500,
     max_price: float = 20,
-    min_velocity: float = 1000,
+    min_volume: float = 10_000,
+    velocity_ratio: float = 0.10,
 ) -> list[dict]:
     """
-    Find underdog markets: YES price <20% but gaining volume.
-    These are contrarian plays where money is flowing against consensus.
+    Find underdog markets with REAL signal (not just low price + some volume).
+
+    New logic: velocity must be significant RELATIVE to market size.
+    A $50K market with $5K/hr = 10% of volume moving per hour = interesting.
 
     Args:
         target_count: How many markets to fetch
         max_price: Maximum YES price to qualify as underdog (default 20%)
-        min_velocity: Minimum $/hr velocity to show interest
+        min_volume: Minimum total volume to filter out tiny markets
+        velocity_ratio: Velocity must be >= this fraction of total volume
 
     Returns:
         List of underdog markets with velocity data
@@ -609,6 +653,9 @@ async def check_underdog_alerts(
         target_count=target_count,
         include_spam=False
     )
+
+    # Filter out sports markets
+    events = filter_sports(events)
 
     # Get volume deltas
     slugs = [e.get("slug") for e in events if e.get("slug")]
@@ -626,18 +673,26 @@ async def check_underdog_alerts(
 
         velocity = deltas[slug]
 
-        # Underdog criteria: low YES price + positive velocity
-        if yes_price <= max_price and velocity >= min_velocity:
+        # Skip markets that are too small or not underdog price
+        if total_volume < min_volume or yes_price > max_price:
+            continue
+
+        # Key insight: velocity must be significant relative to market size
+        # A market with 10% of its volume moving in 1 hour is interesting
+        velocity_pct = velocity / total_volume if total_volume > 0 else 0
+
+        if velocity > 0 and velocity_pct >= velocity_ratio:
             underdogs.append({
                 "title": event.get("title"),
                 "slug": slug,
                 "yes_price": yes_price,
                 "velocity": velocity,
+                "velocity_pct": velocity_pct * 100,  # As percentage
                 "total_volume": total_volume,
                 "tags": event.get("tags", []),
             })
 
-    # Sort by velocity (most action first)
+    # Sort by velocity percentage (highest relative action first)
     underdogs.sort(key=lambda x: x["velocity"], reverse=True)
 
     return underdogs
@@ -645,12 +700,12 @@ async def check_underdog_alerts(
 
 async def check_closing_soon_alerts(
     target_count: int = 500,
-    hours_until_close: int = 24,
-    min_velocity: float = 2000,
+    hours_until_close: int = None,
+    min_velocity: float = None,
 ) -> list[dict]:
     """
-    Find markets closing within 24 hours that have volume activity.
-    Last-minute action before resolution.
+    Find markets closing soon that have significant volume activity.
+    Last-minute action before resolution often indicates insider knowledge.
 
     Args:
         target_count: How many markets to fetch
@@ -662,11 +717,20 @@ async def check_closing_soon_alerts(
     """
     from datetime import datetime, timezone
 
+    # Apply config defaults
+    if hours_until_close is None:
+        hours_until_close = CLOSING_SOON_HOURS
+    if min_velocity is None:
+        min_velocity = CLOSING_SOON_MIN_VELOCITY
+
     # Fetch markets
     events = await get_all_markets_paginated(
         target_count=target_count,
         include_spam=False
     )
+
+    # Filter out sports markets
+    events = filter_sports(events)
 
     # Get volume deltas
     slugs = [e.get("slug") for e in events if e.get("slug")]
@@ -722,19 +786,23 @@ def format_bundled_underdogs(alerts: list[dict]) -> str:
     if not alerts:
         return ""
 
-    lines = ["Underdog Alert (YES <20% but money flowing)", ""]
+    lines = ["Underdogs (YES <20% + significant action)", ""]
 
-    for a in alerts:
+    for i, a in enumerate(alerts[:10], 1):
         title = a.get("title", "Unknown")[:40]
         yes_price = a.get("yes_price", 0)
         velocity = a.get("velocity", 0)
+        velocity_pct = a.get("velocity_pct", 0)
+        total_volume = a.get("total_volume", 0)
         slug = a.get("slug", "")
 
         vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+        vol_str = _format_volume(total_volume)
 
-        lines.append(f"- {title}")
-        lines.append(f"  YES: {yes_price:.0f}% | {vel_str}")
-        lines.append(f"  polymarket.com/event/{slug}")
+        lines.append(f"{i}. {title}")
+        lines.append(f"   YES: {yes_price:.0f}% | {vel_str} ({velocity_pct:.0f}% of vol)")
+        lines.append(f"   Total: {vol_str}")
+        lines.append(f"   polymarket.com/event/{slug}")
         lines.append("")
 
     return "\n".join(lines).strip()

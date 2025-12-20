@@ -26,16 +26,16 @@ CHECK_INTERVAL_MINUTES = 5
 
 # Volume milestone thresholds (in dollars)
 # Alert when a market crosses these for the first time
-# More thresholds = more signals as markets grow
+# Higher thresholds = less noise, more signal
 VOLUME_THRESHOLDS = [
-    10_000,     # $10K - early interest
-    25_000,     # $25K - gaining traction
-    50_000,     # $50K - significant
     100_000,    # $100K - serious money
     250_000,    # $250K - major market
     500_000,    # $500K - whale territory
     1_000_000,  # $1M - massive
 ]
+
+# Discovery threshold - minimum volume for first-seen markets to alert
+DISCOVERY_MIN_VOLUME = 25_000  # $25K - market launched with traction
 
 # Velocity alert thresholds (dollars gained per hour)
 # Catches breaking news - money flowing in fast
@@ -46,6 +46,10 @@ VELOCITY_THRESHOLDS = [
     50_000,     # $50K/hr - major event
     100_000,    # $100K/hr - huge story
 ]
+
+# Closing soon alert settings
+CLOSING_SOON_HOURS = 12  # Alert for markets closing within 12 hours
+CLOSING_SOON_MIN_VELOCITY = 5_000  # Minimum $5K/hr velocity
 
 # Alert limits per cycle (safety net to prevent spam)
 ALERT_CAP_PER_CYCLE = 10  # Max individual alerts per type per cycle
@@ -82,4 +86,24 @@ SPAM_PHRASES = [
     "up or down",
     "higher or lower",
     "above or below",
+]
+
+# Sports/esports slug patterns to exclude (no edge on sports betting)
+SPORTS_SLUG_PATTERNS = [
+    "nfl-", "nba-", "nhl-", "mlb-", "mls-",
+    "epl-", "uefa-", "fifa-", "cfb-", "ncaa-",
+    "boxing-", "ufc-", "mma-", "wwe-",
+    "dota-", "csgo-", "lol-", "valorant-", "esport",
+    "f1-", "nascar-", "tennis-", "golf-", "pga-",
+    "olympics-", "world-cup-", "super-bowl-",
+]
+
+# Sports-related title patterns
+SPORTS_TITLE_KEYWORDS = [
+    "NFL", "NBA", "NHL", "MLB", "MLS",
+    "Premier League", "Champions League", "La Liga", "Serie A",
+    "Super Bowl", "World Series", "Stanley Cup", "Finals",
+    "vs.", " vs ", "match", "game ",
+    "UFC", "boxing", "fight",
+    "Dota", "CS:GO", "League of Legends", "Valorant",
 ]

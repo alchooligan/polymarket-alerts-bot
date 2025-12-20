@@ -28,18 +28,13 @@ from database import (
 from polymarket import get_all_markets_paginated
 from alerts import (
     check_new_markets,
-    check_price_movements,
     check_volume_milestones,
-    check_velocity_alerts,
-    check_underdog_alerts,
     check_closing_soon_alerts,
     format_bundled_milestones,
     format_bundled_discoveries,
-    format_bundled_big_moves,
     format_bundled_new_markets,
-    format_bundled_velocity,
-    format_bundled_underdogs,
     format_bundled_closing_soon,
+    filter_sports,
 )
 
 logger = logging.getLogger(__name__)
@@ -79,12 +74,8 @@ async def run_alert_cycle(app: Application) -> dict:
 
     stats = {
         "markets_scanned": 0,
-        "new_markets": 0,
-        "big_moves": 0,
         "milestones": 0,
         "discoveries": 0,
-        "velocity": 0,
-        "underdogs": 0,
         "closing_soon": 0,
         "watchlist": 0,
         "alerts_sent": 0,
@@ -112,78 +103,12 @@ async def run_alert_cycle(app: Application) -> dict:
         logger.info("No users with alerts enabled, skipping alert checks")
         return stats
 
-    # Separate users by alert type
-    new_market_users = [u for u in users if u.get("new_markets_enabled")]
-    big_move_users = [u for u in users if u.get("big_moves_enabled")]
-
-    # Check for new markets
-    if new_market_users:
-        logger.info(f"Checking new markets for {len(new_market_users)} users...")
-        new_markets = await check_new_markets(
-            limit=100,
-            min_volume=100,  # Filter out $0 markets
-            mark_seen=True
-        )
-        stats["new_markets"] = len(new_markets)
-
-        if new_markets:
-            # Per-user filtering - each user only sees markets they haven't been alerted about
-            for user in new_market_users:
-                user_id = user["telegram_id"]
-                user_markets = filter_unseen_markets(user_id, new_markets, "new_market")
-
-                if not user_markets:
-                    continue
-
-                to_send = user_markets[:ALERT_CAP_PER_CYCLE]
-                overflow = len(user_markets) - len(to_send)
-
-                message = format_bundled_new_markets(to_send)
-                if overflow > 0:
-                    message += f"\n\n+{overflow} more new markets"
-
-                sent = await send_alert_to_user(app, user_id, message, "new_market_bundle", None)
-                if sent:
-                    stats["alerts_sent"] += 1
-                    # Mark these markets as alerted for this user
-                    mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "new_market")
-
-    # Check for price movements
-    if big_move_users:
-        logger.info(f"Checking price movements for {len(big_move_users)} users...")
-        big_moves = await check_price_movements(
-            limit=100,
-            threshold=10,  # 10% move
-            hours=1,
-            save_snapshots=True
-        )
-        stats["big_moves"] = len(big_moves)
-
-        if big_moves:
-            # Per-user filtering
-            for user in big_move_users:
-                user_id = user["telegram_id"]
-                user_moves = filter_unseen_markets(user_id, big_moves, "big_move")
-
-                if not user_moves:
-                    continue
-
-                to_send = user_moves[:ALERT_CAP_PER_CYCLE]
-                overflow = len(user_moves) - len(to_send)
-
-                message = format_bundled_big_moves(to_send)
-                if overflow > 0:
-                    message += f"\n\n+{overflow} more big moves"
-
-                sent = await send_alert_to_user(app, user_id, message, "big_move_bundle", None)
-                if sent:
-                    stats["alerts_sent"] += 1
-                    mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "big_move")
+    # Users who want milestone/discovery alerts
+    milestone_users = [u for u in users if u.get("new_markets_enabled")]
 
     # Check for volume milestones (the KEY signal)
-    # Send to users with new_markets_enabled for now
-    if new_market_users:
-        logger.info(f"Checking volume milestones for {len(new_market_users)} users...")
+    if milestone_users:
+        logger.info(f"Checking volume milestones for {len(milestone_users)} users...")
         milestones, discoveries = await check_volume_milestones(
             target_count=MARKETS_TO_SCAN,
             record=True
@@ -194,7 +119,7 @@ async def run_alert_cycle(app: Application) -> dict:
 
         if milestones:
             # Per-user filtering
-            for user in new_market_users:
+            for user in milestone_users:
                 user_id = user["telegram_id"]
                 user_milestones = filter_unseen_markets(user_id, milestones, "milestone")
 
@@ -215,7 +140,7 @@ async def run_alert_cycle(app: Application) -> dict:
 
         # Send discovery alerts (first-seen markets that launched big)
         if discoveries:
-            for user in new_market_users:
+            for user in milestone_users:
                 user_id = user["telegram_id"]
                 user_discoveries = filter_unseen_markets(user_id, discoveries, "discovery")
 
@@ -234,63 +159,15 @@ async def run_alert_cycle(app: Application) -> dict:
                     stats["alerts_sent"] += 1
                     mark_user_alerted_bulk(user_id, [d["slug"] for d in to_send], "discovery")
 
-    # Check for velocity alerts (money moving fast - breaking news)
-    if new_market_users:
-        logger.info(f"Checking velocity alerts for {len(new_market_users)} users...")
-        velocity_alerts = await check_velocity_alerts(target_count=MARKETS_TO_SCAN)
-        stats["velocity"] = len(velocity_alerts)
-
-        if velocity_alerts:
-            # Per-user filtering
-            for user in new_market_users:
-                user_id = user["telegram_id"]
-                user_velocity = filter_unseen_markets(user_id, velocity_alerts, "velocity")
-
-                if not user_velocity:
-                    continue
-
-                to_send = user_velocity[:ALERT_CAP_PER_CYCLE]
-                overflow = len(user_velocity) - len(to_send)
-
-                message = format_bundled_velocity(to_send)
-                if overflow > 0:
-                    message += f"\n\n+{overflow} more fast-moving markets"
-
-                sent = await send_alert_to_user(app, user_id, message, "velocity_bundle", None)
-                if sent:
-                    stats["alerts_sent"] += 1
-                    mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "velocity")
-
-    # Check for underdog alerts (YES <20% but money flowing)
-    if new_market_users:
-        logger.info("Checking underdog alerts...")
-        underdogs = await check_underdog_alerts(target_count=MARKETS_TO_SCAN)
-        stats["underdogs"] = len(underdogs)
-
-        if underdogs:
-            for user in new_market_users:
-                user_id = user["telegram_id"]
-                user_underdogs = filter_unseen_markets(user_id, underdogs, "underdog")
-
-                if not user_underdogs:
-                    continue
-
-                to_send = user_underdogs[:ALERT_CAP_PER_CYCLE]
-                message = format_bundled_underdogs(to_send)
-
-                sent = await send_alert_to_user(app, user_id, message, "underdog_bundle", None)
-                if sent:
-                    stats["alerts_sent"] += 1
-                    mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "underdog")
-
-    # Check for closing soon alerts (markets ending in 24h with action)
-    if new_market_users:
+    # Check for closing soon alerts (markets ending soon with action)
+    closing_users = [u for u in users if u.get("new_markets_enabled")]
+    if closing_users:
         logger.info("Checking closing soon alerts...")
         closing = await check_closing_soon_alerts(target_count=MARKETS_TO_SCAN)
         stats["closing_soon"] = len(closing)
 
         if closing:
-            for user in new_market_users:
+            for user in closing_users:
                 user_id = user["telegram_id"]
                 user_closing = filter_unseen_markets(user_id, closing, "closing_soon")
 
