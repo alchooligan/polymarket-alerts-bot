@@ -6,9 +6,16 @@ Uses APScheduler to run checks every X minutes.
 import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+from apscheduler.triggers.cron import CronTrigger
 from telegram.ext import Application
 
-from config import CHECK_INTERVAL_MINUTES, ALERT_CAP_PER_CYCLE, MARKETS_TO_SCAN
+from config import (
+    CHECK_INTERVAL_MINUTES,
+    ALERT_CAP_PER_CYCLE,
+    MARKETS_TO_SCAN,
+    DAILY_DIGEST_HOUR,
+    DAILY_DIGEST_MINUTE,
+)
 from database import (
     get_all_users_with_alerts_enabled,
     log_alert,
@@ -271,7 +278,7 @@ def start_scheduler(app: Application) -> AsyncIOScheduler:
 
     scheduler = AsyncIOScheduler()
 
-    # Add the alert cycle job
+    # Add the alert cycle job (every 5 min)
     scheduler.add_job(
         run_alert_cycle,
         trigger=IntervalTrigger(minutes=CHECK_INTERVAL_MINUTES),
@@ -281,8 +288,18 @@ def start_scheduler(app: Application) -> AsyncIOScheduler:
         replace_existing=True,
     )
 
+    # Add daily digest job (9am UTC)
+    scheduler.add_job(
+        run_daily_digest,
+        trigger=CronTrigger(hour=DAILY_DIGEST_HOUR, minute=DAILY_DIGEST_MINUTE),
+        args=[app],
+        id="daily_digest",
+        name="Daily Digest",
+        replace_existing=True,
+    )
+
     scheduler.start()
-    logger.info(f"Scheduler started. Running every {CHECK_INTERVAL_MINUTES} minutes.")
+    logger.info(f"Scheduler started. Alerts every {CHECK_INTERVAL_MINUTES} min, digest at {DAILY_DIGEST_HOUR}:00 UTC.")
 
     return scheduler
 
@@ -293,6 +310,98 @@ def stop_scheduler() -> None:
     if scheduler and scheduler.running:
         scheduler.shutdown(wait=False)
         logger.info("Scheduler stopped.")
+
+
+async def run_daily_digest(app: Application) -> dict:
+    """
+    Send a daily digest to all users at 9am.
+    Summarizes: top markets, biggest movers, velocity leaders.
+    """
+    logger.info("Running daily digest...")
+
+    stats = {"users_sent": 0}
+
+    # Get users with alerts enabled
+    users = get_all_users_with_alerts_enabled()
+    if not users:
+        logger.info("No users for daily digest")
+        return stats
+
+    try:
+        # Fetch top markets
+        events = await get_all_markets_paginated(target_count=100, include_spam=False)
+
+        if not events:
+            logger.warning("No events for daily digest")
+            return stats
+
+        # Sort by volume for top markets
+        top_by_volume = sorted(events, key=lambda x: x.get("total_volume", 0), reverse=True)[:5]
+
+        # Get velocity data
+        slugs = [e.get("slug") for e in events if e.get("slug")]
+        from database import get_volume_deltas_bulk
+        deltas = get_volume_deltas_bulk(slugs, hours=24)
+
+        # Find top velocity (24h)
+        velocity_leaders = []
+        for e in events:
+            slug = e.get("slug")
+            if slug in deltas and deltas[slug] > 0:
+                velocity_leaders.append({**e, "delta_24h": deltas[slug]})
+        velocity_leaders.sort(key=lambda x: x["delta_24h"], reverse=True)
+        velocity_leaders = velocity_leaders[:5]
+
+        # Build digest message
+        lines = ["Daily Digest", ""]
+
+        # Top by volume
+        lines.append("Top Markets:")
+        for e in top_by_volume:
+            title = e.get("title", "Unknown")[:35]
+            vol = e.get("total_volume", 0)
+            if vol >= 1_000_000:
+                vol_str = f"${vol/1_000_000:.1f}M"
+            else:
+                vol_str = f"${vol/1_000:.0f}K"
+            lines.append(f"• {title} ({vol_str})")
+        lines.append("")
+
+        # Velocity leaders
+        if velocity_leaders:
+            lines.append("Fastest Growing (24h):")
+            for e in velocity_leaders:
+                title = e.get("title", "Unknown")[:35]
+                delta = e.get("delta_24h", 0)
+                if delta >= 1_000:
+                    delta_str = f"+${delta/1_000:.0f}K"
+                else:
+                    delta_str = f"+${delta:.0f}"
+                lines.append(f"• {title} ({delta_str})")
+            lines.append("")
+
+        lines.append("Use /discover for more rising markets.")
+
+        message = "\n".join(lines)
+
+        # Send to all users
+        for user in users:
+            try:
+                await app.bot.send_message(
+                    chat_id=user["telegram_id"],
+                    text=message,
+                    disable_web_page_preview=True
+                )
+                stats["users_sent"] += 1
+            except Exception as e:
+                logger.error(f"Failed to send digest to {user['telegram_id']}: {e}")
+
+        logger.info(f"Daily digest sent to {stats['users_sent']} users")
+
+    except Exception as e:
+        logger.error(f"Error in daily digest: {e}")
+
+    return stats
 
 
 async def run_manual_cycle(app: Application) -> dict:

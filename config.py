@@ -50,6 +50,10 @@ VELOCITY_THRESHOLDS = [
 ALERT_CAP_PER_CYCLE = 10  # Max individual alerts per type per cycle
 MARKETS_TO_SCAN = 500  # How many markets to fetch with pagination
 
+# Daily digest settings
+DAILY_DIGEST_HOUR = 9  # 9 AM UTC
+DAILY_DIGEST_MINUTE = 0
+
 # Database - uses Railway persistent volume at /data, local fallback for dev
 import os
 DATABASE_PATH = "/data/bot_data.db" if os.path.exists("/data") else "bot_data.db"

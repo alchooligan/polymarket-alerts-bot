@@ -19,7 +19,7 @@ from database import (
     remove_from_watchlist,
     get_watchlist,
 )
-from scheduler import start_scheduler, stop_scheduler, run_manual_cycle
+from scheduler import start_scheduler, stop_scheduler, run_manual_cycle, run_daily_digest
 
 # Set up logging
 logging.basicConfig(
@@ -390,6 +390,18 @@ Seeded flag: {seeded}"""
         await update.message.reply_text(f"Debug error: {e}")
 
 
+async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /digest command - manually trigger daily digest."""
+    await update.message.reply_text("Sending daily digest...")
+
+    try:
+        stats = await run_daily_digest(context.application)
+        await update.message.reply_text(f"Digest sent to {stats['users_sent']} users.")
+    except Exception as e:
+        logger.error(f"Error in digest: {e}")
+        await update.message.reply_text(f"Error: {e}")
+
+
 async def seed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /seed command - force re-seed volume baselines."""
     from alerts import seed_volume_baselines
@@ -472,6 +484,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("watch", watch_command))
     application.add_handler(CommandHandler("unwatch", unwatch_command))
     application.add_handler(CommandHandler("watchlist", watchlist_command))
+    application.add_handler(CommandHandler("digest", digest_command))
 
     # Add callback handler for inline buttons
     application.add_handler(CallbackQueryHandler(settings_callback))
