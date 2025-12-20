@@ -477,6 +477,7 @@ async def checknow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 Scanned ~{stats['markets_scanned']} markets
 • {stats['milestones']} volume milestones
+• {stats['discoveries']} discoveries (launched big)
 • {stats['velocity']} velocity ($5K+/hr)
 • {stats['underdogs']} underdogs (YES<20% + action)
 • {stats['closing_soon']} closing soon (24h)

@@ -139,6 +139,7 @@ def init_database() -> None:
         CREATE TABLE IF NOT EXISTS volume_baselines (
             event_slug TEXT PRIMARY KEY,
             last_volume REAL NOT NULL,
+            first_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -828,6 +829,8 @@ def get_volume_deltas_bulk(event_slugs: list[str], hours: int = 1) -> dict[str, 
     """
     Get volume deltas for multiple markets.
     Returns {slug: delta} dict. Missing = no old snapshot.
+
+    Optimized: Single query with CTEs instead of N*2 queries.
     """
     if not event_slugs:
         return {}
@@ -835,34 +838,40 @@ def get_volume_deltas_bulk(event_slugs: list[str], hours: int = 1) -> dict[str, 
     conn = get_connection()
     cursor = conn.cursor()
 
-    results = {}
+    # Build placeholders for IN clause
+    placeholders = ",".join("?" * len(event_slugs))
     time_threshold = f"-{hours} hours"
 
-    for slug in event_slugs:
-        # Get most recent volume
-        cursor.execute("""
-            SELECT volume FROM volume_snapshots
-            WHERE event_slug = ?
-            ORDER BY recorded_at DESC
-            LIMIT 1
-        """, (slug,))
-        current = cursor.fetchone()
+    # Single query using CTEs for current and old volumes
+    query = f"""
+    WITH current_volumes AS (
+        SELECT event_slug, volume,
+               ROW_NUMBER() OVER (PARTITION BY event_slug ORDER BY recorded_at DESC) as rn
+        FROM volume_snapshots
+        WHERE event_slug IN ({placeholders})
+    ),
+    old_volumes AS (
+        SELECT event_slug, volume,
+               ROW_NUMBER() OVER (PARTITION BY event_slug ORDER BY recorded_at DESC) as rn
+        FROM volume_snapshots
+        WHERE event_slug IN ({placeholders})
+        AND recorded_at <= datetime('now', ?)
+    )
+    SELECT
+        c.event_slug,
+        c.volume as current_volume,
+        o.volume as old_volume,
+        (c.volume - o.volume) as delta
+    FROM current_volumes c
+    JOIN old_volumes o ON c.event_slug = o.event_slug
+    WHERE c.rn = 1 AND o.rn = 1
+    """
 
-        if not current:
-            continue
+    # Parameters: slugs for current, slugs for old, time threshold
+    params = list(event_slugs) + list(event_slugs) + [time_threshold]
+    cursor.execute(query, params)
 
-        # Get volume from X hours ago
-        cursor.execute("""
-            SELECT volume FROM volume_snapshots
-            WHERE event_slug = ?
-            AND recorded_at <= datetime('now', ?)
-            ORDER BY recorded_at DESC
-            LIMIT 1
-        """, (slug, time_threshold))
-        old = cursor.fetchone()
-
-        if old:
-            results[slug] = current["volume"] - old["volume"]
+    results = {row["event_slug"]: row["delta"] for row in cursor.fetchall()}
 
     conn.close()
     return results

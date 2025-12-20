@@ -34,6 +34,7 @@ from alerts import (
     check_underdog_alerts,
     check_closing_soon_alerts,
     format_bundled_milestones,
+    format_bundled_discoveries,
     format_bundled_big_moves,
     format_bundled_new_markets,
     format_bundled_velocity,
@@ -81,6 +82,7 @@ async def run_alert_cycle(app: Application) -> dict:
         "new_markets": 0,
         "big_moves": 0,
         "milestones": 0,
+        "discoveries": 0,
         "velocity": 0,
         "underdogs": 0,
         "closing_soon": 0,
@@ -89,6 +91,7 @@ async def run_alert_cycle(app: Application) -> dict:
     }
 
     # Save volume snapshots FIRST - we need this data regardless of users
+    events = []  # Initialize to prevent undefined variable
     try:
         logger.info("Fetching markets for snapshots...")
         events = await get_all_markets_paginated(target_count=MARKETS_TO_SCAN, include_spam=False)
@@ -97,9 +100,11 @@ async def run_alert_cycle(app: Application) -> dict:
             stats["markets_scanned"] = len(events)
             logger.info(f"Saved {len(events)} volume snapshots")
         else:
-            logger.warning("No events returned from API")
+            logger.warning("API returned 0 events - velocity/watchlist checks will be skipped")
+            return stats  # Can't do anything useful without market data
     except Exception as e:
-        logger.error(f"Failed to save volume snapshots: {e}")
+        logger.error(f"Failed to fetch markets: {e} - aborting cycle")
+        return stats  # Don't continue with stale/no data
 
     # Get users with alerts enabled
     users = get_all_users_with_alerts_enabled()
@@ -179,11 +184,12 @@ async def run_alert_cycle(app: Application) -> dict:
     # Send to users with new_markets_enabled for now
     if new_market_users:
         logger.info(f"Checking volume milestones for {len(new_market_users)} users...")
-        milestones = await check_volume_milestones(
+        milestones, discoveries = await check_volume_milestones(
             target_count=MARKETS_TO_SCAN,
             record=True
         )
         stats["milestones"] = len(milestones)
+        stats["discoveries"] = len(discoveries)
         stats["markets_scanned"] = MARKETS_TO_SCAN  # Approximate
 
         if milestones:
@@ -206,6 +212,27 @@ async def run_alert_cycle(app: Application) -> dict:
                 if sent:
                     stats["alerts_sent"] += 1
                     mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "milestone")
+
+        # Send discovery alerts (first-seen markets that launched big)
+        if discoveries:
+            for user in new_market_users:
+                user_id = user["telegram_id"]
+                user_discoveries = filter_unseen_markets(user_id, discoveries, "discovery")
+
+                if not user_discoveries:
+                    continue
+
+                to_send = user_discoveries[:ALERT_CAP_PER_CYCLE]
+                overflow = len(user_discoveries) - len(to_send)
+
+                message = format_bundled_discoveries(to_send)
+                if overflow > 0:
+                    message += f"\n\n+{overflow} more new discoveries"
+
+                sent = await send_alert_to_user(app, user_id, message, "discovery_bundle", None)
+                if sent:
+                    stats["alerts_sent"] += 1
+                    mark_user_alerted_bulk(user_id, [d["slug"] for d in to_send], "discovery")
 
     # Check for velocity alerts (money moving fast - breaking news)
     if new_market_users:

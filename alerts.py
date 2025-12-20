@@ -288,21 +288,24 @@ async def seed_volume_baselines(
 async def check_volume_milestones(
     target_count: int = 500,
     thresholds: list[int] = None,
-    record: bool = True
-) -> list[dict]:
+    record: bool = True,
+    min_discovery_volume: int = 10_000,
+) -> tuple[list[dict], list[dict]]:
     """
     Check for markets that have ACTUALLY crossed volume thresholds.
     Uses delta logic: previous volume < threshold <= current volume.
 
-    This is the KEY signal - a market hitting $10K or $50K means real interest.
+    Also returns "discoveries" - markets we're seeing for the first time
+    that already have significant volume (user shouldn't miss these).
 
     Args:
         target_count: How many markets to fetch (uses pagination)
         thresholds: Volume thresholds to check
         record: If True, record milestones and update baselines
+        min_discovery_volume: Minimum volume for a first-seen market to be a "discovery"
 
     Returns:
-        List of dicts with market info and milestone details
+        Tuple of (milestones_crossed, discoveries)
     """
     if thresholds is None:
         thresholds = VOLUME_THRESHOLDS
@@ -312,7 +315,7 @@ async def check_volume_milestones(
         logger.info("Volume baselines not seeded yet, seeding now...")
         await seed_volume_baselines(target_count=target_count, thresholds=thresholds)
         # After seeding, no crossings to report (all existing ones were recorded)
-        return []
+        return [], []
 
     # Fetch markets with pagination
     events = await get_all_markets_paginated(
@@ -325,6 +328,7 @@ async def check_volume_milestones(
     baselines = get_volume_baselines_bulk(slugs)
 
     milestones_crossed = []
+    discoveries = []
     baselines_to_update = []
 
     for event in events:
@@ -338,13 +342,30 @@ async def check_volume_milestones(
         previous_volume = baselines.get(slug)
 
         if previous_volume is None:
-            # New market we haven't seen - record baseline, no alert
+            # New market we haven't seen before
             baselines_to_update.append((slug, current_volume))
-            # Record any thresholds already crossed (silently)
+
+            # Record thresholds already crossed
             for threshold in thresholds:
                 if current_volume >= threshold:
                     if record:
                         record_milestone(slug, threshold, current_volume)
+
+            # If it has significant volume, it's a DISCOVERY (don't let user miss it)
+            if current_volume >= min_discovery_volume:
+                # Find highest threshold it's already at
+                crossed = [t for t in thresholds if current_volume >= t]
+                highest = max(crossed) if crossed else min_discovery_volume
+
+                discoveries.append({
+                    "title": event.get("title"),
+                    "slug": slug,
+                    "current_volume": current_volume,
+                    "threshold": highest,
+                    "yes_price": event.get("yes_price", 0),
+                    "tags": event.get("tags", []),
+                    "is_discovery": True,
+                })
             continue
 
         # Find thresholds that were CROSSED (prev < threshold <= current)
@@ -364,7 +385,7 @@ async def check_volume_milestones(
                 "title": event.get("title"),
                 "slug": slug,
                 "threshold": highest,
-                "also_crossed": also_crossed,  # Other thresholds crossed in same check
+                "also_crossed": also_crossed,
                 "previous_volume": previous_volume,
                 "current_volume": current_volume,
                 "yes_price": event.get("yes_price", 0),
@@ -378,10 +399,11 @@ async def check_volume_milestones(
     if record and baselines_to_update:
         update_volume_baselines_bulk(baselines_to_update)
 
-    # Sort by threshold (higher = more significant)
+    # Sort by threshold/volume (higher = more significant)
     milestones_crossed.sort(key=lambda x: x["threshold"], reverse=True)
+    discoveries.sort(key=lambda x: x["current_volume"], reverse=True)
 
-    return milestones_crossed
+    return milestones_crossed, discoveries
 
 
 async def check_velocity_alerts(
@@ -510,6 +532,29 @@ def format_bundled_milestones(milestones: list[dict]) -> str:
 
         lines.append(f"- {title}")
         lines.append(f"  Crossed {threshold_str} | Now {volume_str} | YES: {yes_price:.0f}%")
+        lines.append(f"  polymarket.com/event/{slug}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def format_bundled_discoveries(discoveries: list[dict]) -> str:
+    """Format discovery alerts - markets we're seeing for the first time with big volume."""
+    if not discoveries:
+        return ""
+
+    lines = ["New Discovery (launched big)", ""]
+
+    for d in discoveries:
+        title = d.get("title", "Unknown")[:45]
+        volume = d.get("current_volume", 0)
+        yes_price = d.get("yes_price", 0)
+        slug = d.get("slug", "")
+
+        volume_str = _format_volume(volume)
+
+        lines.append(f"- {title}")
+        lines.append(f"  Already at {volume_str} | YES: {yes_price:.0f}%")
         lines.append(f"  polymarket.com/event/{slug}")
         lines.append("")
 
