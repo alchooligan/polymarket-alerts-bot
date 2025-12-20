@@ -90,6 +90,18 @@ def init_database() -> None:
         )
     """)
 
+    # Per-user alert memory - tracks which markets each user has been alerted about
+    # Prevents duplicate alerts for the same market to the same user
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_alerts (
+            telegram_id INTEGER NOT NULL,
+            event_slug TEXT NOT NULL,
+            alert_type TEXT NOT NULL,
+            alerted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (telegram_id, event_slug, alert_type)
+        )
+    """)
+
     # Volume milestones - track which thresholds each market has crossed
     # Once a market crosses $10K, we record it so we never alert again for $10K
     cursor.execute("""
@@ -381,6 +393,65 @@ def log_alert(telegram_id: int, alert_type: str, event_slug: str = None) -> None
     )
     conn.commit()
     conn.close()
+
+
+def was_user_alerted(telegram_id: int, event_slug: str, alert_type: str) -> bool:
+    """Check if a user has already been alerted about a specific market."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT 1 FROM user_alerts WHERE telegram_id = ? AND event_slug = ? AND alert_type = ?",
+        (telegram_id, event_slug, alert_type)
+    )
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
+
+
+def mark_user_alerted(telegram_id: int, event_slug: str, alert_type: str) -> None:
+    """Record that a user has been alerted about a market."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR IGNORE INTO user_alerts (telegram_id, event_slug, alert_type) VALUES (?, ?, ?)",
+        (telegram_id, event_slug, alert_type)
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_user_alerted_bulk(telegram_id: int, event_slugs: list[str], alert_type: str) -> None:
+    """Record that a user has been alerted about multiple markets."""
+    if not event_slugs:
+        return
+    conn = get_connection()
+    cursor = conn.cursor()
+    for slug in event_slugs:
+        cursor.execute(
+            "INSERT OR IGNORE INTO user_alerts (telegram_id, event_slug, alert_type) VALUES (?, ?, ?)",
+            (telegram_id, slug, alert_type)
+        )
+    conn.commit()
+    conn.close()
+
+
+def filter_unseen_markets(telegram_id: int, markets: list[dict], alert_type: str) -> list[dict]:
+    """Filter markets to only include ones the user hasn't been alerted about."""
+    if not markets:
+        return []
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Get all slugs this user has been alerted about for this type
+    cursor.execute(
+        "SELECT event_slug FROM user_alerts WHERE telegram_id = ? AND alert_type = ?",
+        (telegram_id, alert_type)
+    )
+    seen_slugs = {row["event_slug"] for row in cursor.fetchall()}
+    conn.close()
+
+    return [m for m in markets if m.get("slug") not in seen_slugs]
 
 
 def get_alerts_sent_in_last_hour(telegram_id: int, alert_type: str = None) -> int:

@@ -9,7 +9,13 @@ from apscheduler.triggers.interval import IntervalTrigger
 from telegram.ext import Application
 
 from config import CHECK_INTERVAL_MINUTES, ALERT_CAP_PER_CYCLE, MARKETS_TO_SCAN
-from database import get_all_users_with_alerts_enabled, log_alert, save_volume_snapshots_bulk
+from database import (
+    get_all_users_with_alerts_enabled,
+    log_alert,
+    save_volume_snapshots_bulk,
+    filter_unseen_markets,
+    mark_user_alerted_bulk,
+)
 from polymarket import get_all_markets_paginated
 from alerts import (
     check_new_markets,
@@ -97,21 +103,26 @@ async def run_alert_cycle(app: Application) -> dict:
         stats["new_markets"] = len(new_markets)
 
         if new_markets:
-            # Apply cap and send ONE bundled message
-            to_send = new_markets[:ALERT_CAP_PER_CYCLE]
-            overflow = len(new_markets) - len(to_send)
-
-            message = format_bundled_new_markets(to_send)
-            if overflow > 0:
-                message += f"\n\n+{overflow} more new markets"
-
-            logger.info(f"Sending bundled new markets alert ({len(to_send)} items)")
+            # Per-user filtering - each user only sees markets they haven't been alerted about
             for user in new_market_users:
-                sent = await send_alert_to_user(
-                    app, user["telegram_id"], message, "new_market_bundle", None
-                )
+                user_id = user["telegram_id"]
+                user_markets = filter_unseen_markets(user_id, new_markets, "new_market")
+
+                if not user_markets:
+                    continue
+
+                to_send = user_markets[:ALERT_CAP_PER_CYCLE]
+                overflow = len(user_markets) - len(to_send)
+
+                message = format_bundled_new_markets(to_send)
+                if overflow > 0:
+                    message += f"\n\n+{overflow} more new markets"
+
+                sent = await send_alert_to_user(app, user_id, message, "new_market_bundle", None)
                 if sent:
                     stats["alerts_sent"] += 1
+                    # Mark these markets as alerted for this user
+                    mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "new_market")
 
     # Check for price movements
     if big_move_users:
@@ -125,21 +136,25 @@ async def run_alert_cycle(app: Application) -> dict:
         stats["big_moves"] = len(big_moves)
 
         if big_moves:
-            # Apply cap and send ONE bundled message
-            to_send = big_moves[:ALERT_CAP_PER_CYCLE]
-            overflow = len(big_moves) - len(to_send)
-
-            message = format_bundled_big_moves(to_send)
-            if overflow > 0:
-                message += f"\n\n+{overflow} more big moves"
-
-            logger.info(f"Sending bundled big moves alert ({len(to_send)} items)")
+            # Per-user filtering
             for user in big_move_users:
-                sent = await send_alert_to_user(
-                    app, user["telegram_id"], message, "big_move_bundle", None
-                )
+                user_id = user["telegram_id"]
+                user_moves = filter_unseen_markets(user_id, big_moves, "big_move")
+
+                if not user_moves:
+                    continue
+
+                to_send = user_moves[:ALERT_CAP_PER_CYCLE]
+                overflow = len(user_moves) - len(to_send)
+
+                message = format_bundled_big_moves(to_send)
+                if overflow > 0:
+                    message += f"\n\n+{overflow} more big moves"
+
+                sent = await send_alert_to_user(app, user_id, message, "big_move_bundle", None)
                 if sent:
                     stats["alerts_sent"] += 1
+                    mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "big_move")
 
     # Check for volume milestones (the KEY signal)
     # Send to users with new_markets_enabled for now
@@ -153,21 +168,25 @@ async def run_alert_cycle(app: Application) -> dict:
         stats["markets_scanned"] = MARKETS_TO_SCAN  # Approximate
 
         if milestones:
-            # Apply cap and send ONE bundled message
-            to_send = milestones[:ALERT_CAP_PER_CYCLE]
-            overflow = len(milestones) - len(to_send)
-
-            message = format_bundled_milestones(to_send)
-            if overflow > 0:
-                message += f"\n\n+{overflow} more volume milestones. Use /top to explore."
-
-            logger.info(f"Sending bundled milestones alert ({len(to_send)} items)")
+            # Per-user filtering
             for user in new_market_users:
-                sent = await send_alert_to_user(
-                    app, user["telegram_id"], message, "milestone_bundle", None
-                )
+                user_id = user["telegram_id"]
+                user_milestones = filter_unseen_markets(user_id, milestones, "milestone")
+
+                if not user_milestones:
+                    continue
+
+                to_send = user_milestones[:ALERT_CAP_PER_CYCLE]
+                overflow = len(user_milestones) - len(to_send)
+
+                message = format_bundled_milestones(to_send)
+                if overflow > 0:
+                    message += f"\n\n+{overflow} more volume milestones. Use /top to explore."
+
+                sent = await send_alert_to_user(app, user_id, message, "milestone_bundle", None)
                 if sent:
                     stats["alerts_sent"] += 1
+                    mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "milestone")
 
     logger.info("Alert cycle complete")
     return stats
