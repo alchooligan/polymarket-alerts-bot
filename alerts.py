@@ -631,13 +631,13 @@ async def check_underdog_alerts(
     target_count: int = 500,
     max_price: float = 20,
     min_volume: float = 10_000,
-    velocity_ratio: float = 0.10,
+    velocity_ratio: float = 0.05,
 ) -> list[dict]:
     """
     Find underdog markets with REAL signal (not just low price + some volume).
 
     New logic: velocity must be significant RELATIVE to market size.
-    A $50K market with $5K/hr = 10% of volume moving per hour = interesting.
+    A $50K market with $2.5K/hr = 5% of volume moving per hour = interesting.
 
     Args:
         target_count: How many markets to fetch

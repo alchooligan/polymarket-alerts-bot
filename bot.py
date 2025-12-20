@@ -146,11 +146,14 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
 
         # Fetch markets
-        events = await get_all_markets_paginated(target_count=500, include_spam=False)
+        events = await get_all_markets_paginated(target_count=2000, include_spam=False)
 
         if not events:
             await update.message.reply_text("No markets found. Try again later.")
             return
+
+        # Filter out sports
+        events = filter_sports(events)
 
         # Get volume deltas for last hour
         slugs = [e["slug"] for e in events]
