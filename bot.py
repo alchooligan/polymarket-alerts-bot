@@ -275,7 +275,8 @@ async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Try to find the market to get its title and current price
     try:
-        events = await get_unique_events(limit=200, include_spam=False)
+        # Search more markets to find the one user wants
+        events = await get_all_markets_paginated(target_count=500, include_spam=False)
         market = next((e for e in events if e.get("slug", "").lower() == slug), None)
 
         if not market:
@@ -391,12 +392,53 @@ Seeded flag: {seeded}"""
 
 
 async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /digest command - manually trigger daily digest."""
-    await update.message.reply_text("Sending daily digest...")
+    """Handle the /digest command - send digest to THIS user (for testing)."""
+    await update.message.reply_text("Building digest...")
 
     try:
-        stats = await run_daily_digest(context.application)
-        await update.message.reply_text(f"Digest sent to {stats['users_sent']} users.")
+        # Build digest for the requesting user
+        events = await get_all_markets_paginated(target_count=100, include_spam=False)
+
+        if not events:
+            await update.message.reply_text("No market data available.")
+            return
+
+        # Top by volume
+        top_by_volume = sorted(events, key=lambda x: x.get("total_volume", 0), reverse=True)[:5]
+
+        # Get velocity data
+        slugs = [e.get("slug") for e in events if e.get("slug")]
+        deltas = get_volume_deltas_bulk(slugs, hours=24)
+
+        velocity_leaders = []
+        for e in events:
+            slug = e.get("slug")
+            if slug in deltas and deltas[slug] > 0:
+                velocity_leaders.append({**e, "delta_24h": deltas[slug]})
+        velocity_leaders.sort(key=lambda x: x["delta_24h"], reverse=True)
+        velocity_leaders = velocity_leaders[:5]
+
+        # Build message
+        lines = ["Daily Digest", ""]
+        lines.append("Top Markets:")
+        for e in top_by_volume:
+            title = e.get("title", "Unknown")[:35]
+            vol = e.get("total_volume", 0)
+            vol_str = f"${vol/1_000_000:.1f}M" if vol >= 1_000_000 else f"${vol/1_000:.0f}K"
+            lines.append(f"• {title} ({vol_str})")
+        lines.append("")
+
+        if velocity_leaders:
+            lines.append("Fastest Growing (24h):")
+            for e in velocity_leaders:
+                title = e.get("title", "Unknown")[:35]
+                delta = e.get("delta_24h", 0)
+                delta_str = f"+${delta/1_000:.0f}K" if delta >= 1_000 else f"+${delta:.0f}"
+                lines.append(f"• {title} ({delta_str})")
+        else:
+            lines.append("(Need 24h of data for velocity)")
+
+        await update.message.reply_text("\n".join(lines))
     except Exception as e:
         logger.error(f"Error in digest: {e}")
         await update.message.reply_text(f"Error: {e}")
