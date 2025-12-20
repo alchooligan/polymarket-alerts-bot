@@ -8,8 +8,14 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 from config import TELEGRAM_BOT_TOKEN, CHECK_INTERVAL_MINUTES
-from polymarket import get_unique_events, get_popular_markets
-from database import init_database, get_or_create_user, toggle_user_setting
+from polymarket import get_unique_events, get_popular_markets, get_all_markets_paginated
+from database import (
+    init_database,
+    get_or_create_user,
+    toggle_user_setting,
+    get_volume_deltas_bulk,
+    get_volume_snapshot_count,
+)
 from scheduler import start_scheduler, stop_scheduler, run_manual_cycle
 
 # Set up logging
@@ -32,7 +38,8 @@ I'll help you track prediction markets on Polymarket.
 
 Commands:
 /start - Show this welcome message
-/markets - Show top markets by volume
+/top - Show top markets by volume
+/discover - Find markets waking up (velocity-based)
 /settings - Configure your alert preferences
 /checknow - Manually trigger alert check
 
@@ -41,13 +48,13 @@ Use /settings to enable:
 - New market alerts
 - Big price movement alerts (10%+ in 1 hour)
 
-Let's get started! Try /markets to see what's trending."""
+Try /top for giants, /discover for rising markets."""
 
     await update.message.reply_text(welcome_message)
 
 
-async def markets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /markets command - show 5 top markets by volume."""
+async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /top command - show 5 top markets by volume."""
     await update.message.reply_text("Fetching top markets...")
 
     try:
@@ -87,6 +94,103 @@ async def markets_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     except Exception as e:
         logger.error(f"Error fetching markets: {e}")
         await update.message.reply_text("Error fetching markets. Please try again later.")
+
+
+async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /discover command - show markets that are waking up (velocity-based)."""
+    await update.message.reply_text("Finding markets waking up...")
+
+    try:
+        # Check if we have enough snapshots
+        snapshot_count = get_volume_snapshot_count()
+        if snapshot_count < 100:
+            await update.message.reply_text(
+                f"Not enough data yet ({snapshot_count} snapshots).\n"
+                "Run /checknow a few times or wait ~30 min for snapshots to accumulate."
+            )
+            return
+
+        # Fetch markets
+        events = await get_all_markets_paginated(target_count=500, include_spam=False)
+
+        if not events:
+            await update.message.reply_text("No markets found. Try again later.")
+            return
+
+        # Get volume deltas for last hour
+        slugs = [e["slug"] for e in events]
+        deltas = get_volume_deltas_bulk(slugs, hours=1)
+
+        if not deltas:
+            await update.message.reply_text(
+                "No velocity data yet. Need ~1 hour of snapshots.\n"
+                "Run /checknow periodically to build history."
+            )
+            return
+
+        # Build list with deltas
+        markets_with_delta = []
+        for event in events:
+            slug = event["slug"]
+            if slug in deltas:
+                delta = deltas[slug]
+                total_volume = event["total_volume"]
+
+                # Filter out giants (>$500K total volume) to force discovery
+                if total_volume > 500_000:
+                    continue
+
+                # Only include positive velocity (growing markets)
+                if delta > 0:
+                    markets_with_delta.append({
+                        **event,
+                        "delta_1h": delta,
+                    })
+
+        # Sort by delta (highest velocity first)
+        markets_with_delta.sort(key=lambda x: x["delta_1h"], reverse=True)
+
+        if not markets_with_delta:
+            await update.message.reply_text(
+                "No waking-up markets found right now.\n"
+                "Try again later when markets start moving."
+            )
+            return
+
+        # Format response
+        response_lines = ["Waking Up (by 1h velocity):\n"]
+
+        for event in markets_with_delta[:10]:
+            title = event["title"][:40]
+            yes_price = event["yes_price"]
+            delta = event["delta_1h"]
+            total = event["total_volume"]
+            slug = event["slug"]
+
+            # Format delta
+            if delta >= 1_000:
+                delta_str = f"+${delta / 1_000:.1f}K"
+            else:
+                delta_str = f"+${delta:.0f}"
+
+            # Format total
+            if total >= 1_000:
+                total_str = f"${total / 1_000:.0f}K"
+            else:
+                total_str = f"${total:.0f}"
+
+            market_text = f"""- {title}
+  {delta_str}/hr | Total: {total_str} | YES: {yes_price:.0f}%
+  polymarket.com/event/{slug}
+"""
+            response_lines.append(market_text)
+
+        response = "\n".join(response_lines)
+        await update.message.reply_text(response, disable_web_page_preview=True)
+
+    except Exception as e:
+        logger.error(f"Error in discover: {e}")
+        await update.message.reply_text(f"Error: {e}")
 
 
 def build_settings_keyboard(user: dict) -> InlineKeyboardMarkup:
@@ -155,8 +259,19 @@ async def checknow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text("Running alert check...")
 
     try:
-        await run_manual_cycle(context.application)
-        await update.message.reply_text("Alert check complete. Check above for any alerts.")
+        stats = await run_manual_cycle(context.application)
+
+        # Build informative response
+        response = f"""Scan complete
+
+Scanned ~{stats['markets_scanned']} markets
+• {stats['milestones']} volume milestones
+• {stats['big_moves']} big price moves
+• {stats['new_markets']} new markets
+
+Alerts sent: {stats['alerts_sent']}"""
+
+        await update.message.reply_text(response)
     except Exception as e:
         logger.error(f"Error in manual alert check: {e}")
         await update.message.reply_text(f"Error running alert check: {e}")
@@ -181,7 +296,9 @@ async def main() -> None:
 
     # Add command handlers
     application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("markets", markets_command))
+    application.add_handler(CommandHandler("top", top_command))
+    application.add_handler(CommandHandler("markets", top_command))  # Alias for backwards compatibility
+    application.add_handler(CommandHandler("discover", discover_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("checknow", checknow_command))
 

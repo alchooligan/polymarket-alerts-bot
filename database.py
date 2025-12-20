@@ -128,6 +128,23 @@ def init_database() -> None:
         )
     """)
 
+    # Volume snapshots - for velocity/acceleration detection
+    # Store volume at each check to calculate delta over time
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS volume_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_slug TEXT NOT NULL,
+            volume REAL NOT NULL,
+            recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Index for time-range queries
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_volume_snapshots_slug_time
+        ON volume_snapshots(event_slug, recorded_at)
+    """)
+
     conn.commit()
     conn.close()
     print("Database initialized.")
@@ -567,6 +584,162 @@ def is_volume_seeded() -> bool:
 def mark_volume_seeded() -> None:
     """Mark that we've completed the initial volume baseline seeding."""
     set_system_flag("volume_baselines_seeded", "1")
+
+
+# ============================================
+# Volume snapshot functions (for velocity detection)
+# ============================================
+
+def save_volume_snapshot(event_slug: str, volume: float) -> None:
+    """Save a volume snapshot for an event."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO volume_snapshots (event_slug, volume) VALUES (?, ?)",
+        (event_slug, volume)
+    )
+    conn.commit()
+    conn.close()
+
+
+def save_volume_snapshots_bulk(events: list[dict]) -> None:
+    """Save volume snapshots for multiple events in one transaction."""
+    if not events:
+        return
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    for event in events:
+        cursor.execute(
+            "INSERT INTO volume_snapshots (event_slug, volume) VALUES (?, ?)",
+            (event.get("slug"), event.get("total_volume", 0))
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_volume_from_hours_ago(event_slug: str, hours: int = 1) -> Optional[float]:
+    """Get the volume snapshot from approximately X hours ago."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT volume FROM volume_snapshots
+        WHERE event_slug = ?
+        AND recorded_at <= datetime('now', ?)
+        ORDER BY recorded_at DESC
+        LIMIT 1
+    """, (event_slug, f"-{hours} hours"))
+    row = cursor.fetchone()
+    conn.close()
+    return row["volume"] if row else None
+
+
+def get_volume_delta(event_slug: str, hours: int = 1) -> Optional[float]:
+    """
+    Calculate volume change over the last X hours.
+    Returns delta (current - old), or None if no old snapshot.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # Get most recent snapshot
+    cursor.execute("""
+        SELECT volume FROM volume_snapshots
+        WHERE event_slug = ?
+        ORDER BY recorded_at DESC
+        LIMIT 1
+    """, (event_slug,))
+    current_row = cursor.fetchone()
+
+    if not current_row:
+        conn.close()
+        return None
+
+    current_volume = current_row["volume"]
+
+    # Get snapshot from X hours ago
+    cursor.execute("""
+        SELECT volume FROM volume_snapshots
+        WHERE event_slug = ?
+        AND recorded_at <= datetime('now', ?)
+        ORDER BY recorded_at DESC
+        LIMIT 1
+    """, (event_slug, f"-{hours} hours"))
+    old_row = cursor.fetchone()
+    conn.close()
+
+    if not old_row:
+        return None
+
+    return current_volume - old_row["volume"]
+
+
+def get_volume_deltas_bulk(event_slugs: list[str], hours: int = 1) -> dict[str, float]:
+    """
+    Get volume deltas for multiple markets.
+    Returns {slug: delta} dict. Missing = no old snapshot.
+    """
+    if not event_slugs:
+        return {}
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    results = {}
+    time_threshold = f"-{hours} hours"
+
+    for slug in event_slugs:
+        # Get most recent volume
+        cursor.execute("""
+            SELECT volume FROM volume_snapshots
+            WHERE event_slug = ?
+            ORDER BY recorded_at DESC
+            LIMIT 1
+        """, (slug,))
+        current = cursor.fetchone()
+
+        if not current:
+            continue
+
+        # Get volume from X hours ago
+        cursor.execute("""
+            SELECT volume FROM volume_snapshots
+            WHERE event_slug = ?
+            AND recorded_at <= datetime('now', ?)
+            ORDER BY recorded_at DESC
+            LIMIT 1
+        """, (slug, time_threshold))
+        old = cursor.fetchone()
+
+        if old:
+            results[slug] = current["volume"] - old["volume"]
+
+    conn.close()
+    return results
+
+
+def cleanup_old_volume_snapshots(days: int = 7) -> int:
+    """Delete volume snapshots older than X days. Returns count deleted."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM volume_snapshots WHERE recorded_at < datetime('now', ?)",
+        (f"-{days} days",)
+    )
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def get_volume_snapshot_count() -> int:
+    """Get total number of volume snapshots (for diagnostics)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) as count FROM volume_snapshots")
+    row = cursor.fetchone()
+    conn.close()
+    return row["count"] if row else 0
 
 
 # ============================================
