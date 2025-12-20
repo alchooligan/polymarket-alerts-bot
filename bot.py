@@ -15,6 +15,9 @@ from database import (
     toggle_user_setting,
     get_volume_deltas_bulk,
     get_volume_snapshot_count,
+    add_to_watchlist,
+    remove_from_watchlist,
+    get_watchlist,
 )
 from scheduler import start_scheduler, stop_scheduler, run_manual_cycle
 
@@ -37,18 +40,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 I'll help you track prediction markets on Polymarket.
 
 Commands:
-/start - Show this welcome message
-/top - Show top markets by volume
-/discover - Find markets waking up (velocity-based)
-/settings - Configure your alert preferences
-/checknow - Manually trigger alert check
+/top - Top markets by volume
+/discover - Markets waking up (velocity)
+/watch <slug> - Watch a specific market
+/watchlist - See your watched markets
+/settings - Configure alerts
+/checknow - Manual scan
 
-Alerts run automatically every 5 minutes.
-Use /settings to enable:
-- New market alerts
-- Big price movement alerts (10%+ in 1 hour)
+Alerts every 5 min:
+• Volume milestones ($10K→$1M)
+• Velocity (money flowing fast)
+• Price moves (10%+)
+• Watchlist updates
 
-Try /top for giants, /discover for rising markets."""
+Try /top for giants, /discover for rising."""
 
     await update.message.reply_text(welcome_message)
 
@@ -254,6 +259,95 @@ Toggle which alerts you want to receive:"""
     await query.edit_message_text(text, reply_markup=keyboard)
 
 
+async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /watch command - add a market to watchlist."""
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /watch <market-slug>\n\n"
+            "Example: /watch will-trump-win-2024\n\n"
+            "Find the slug in the Polymarket URL:\n"
+            "polymarket.com/event/<slug>"
+        )
+        return
+
+    slug = context.args[0].lower().strip()
+    user_id = update.effective_user.id
+
+    # Try to find the market to get its title and current price
+    try:
+        events = await get_unique_events(limit=200, include_spam=False)
+        market = next((e for e in events if e.get("slug", "").lower() == slug), None)
+
+        if not market:
+            await update.message.reply_text(
+                f"Market '{slug}' not found.\n\n"
+                "Make sure you're using the exact slug from the URL."
+            )
+            return
+
+        title = market.get("title", "Unknown")
+        current_price = market.get("yes_price", 0)
+
+        added = add_to_watchlist(user_id, slug, title, current_price)
+
+        if added:
+            await update.message.reply_text(
+                f"Added to watchlist:\n\n"
+                f"- {title}\n"
+                f"  YES: {current_price:.0f}%\n\n"
+                f"You'll get alerts for any price movement.\n"
+                f"Use /watchlist to see all watched markets."
+            )
+        else:
+            await update.message.reply_text(f"'{slug}' is already in your watchlist.")
+
+    except Exception as e:
+        logger.error(f"Error in watch command: {e}")
+        await update.message.reply_text(f"Error: {e}")
+
+
+async def unwatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /unwatch command - remove a market from watchlist."""
+    if not context.args:
+        await update.message.reply_text("Usage: /unwatch <market-slug>")
+        return
+
+    slug = context.args[0].lower().strip()
+    user_id = update.effective_user.id
+
+    removed = remove_from_watchlist(user_id, slug)
+
+    if removed:
+        await update.message.reply_text(f"Removed '{slug}' from your watchlist.")
+    else:
+        await update.message.reply_text(f"'{slug}' was not in your watchlist.")
+
+
+async def watchlist_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /watchlist command - show user's watchlist."""
+    user_id = update.effective_user.id
+    watchlist = get_watchlist(user_id)
+
+    if not watchlist:
+        await update.message.reply_text(
+            "Your watchlist is empty.\n\n"
+            "Use /watch <market-slug> to add markets."
+        )
+        return
+
+    lines = ["Your Watchlist\n"]
+    for item in watchlist:
+        title = item.get("title", "Unknown")[:40]
+        last_price = item.get("last_price", 0)
+        slug = item.get("event_slug", "")
+
+        lines.append(f"- {title}")
+        lines.append(f"  Last: {last_price:.0f}% | /unwatch {slug}")
+        lines.append("")
+
+    await update.message.reply_text("\n".join(lines))
+
+
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /debug command - show database stats for diagnostics."""
     from database import get_connection, is_volume_seeded
@@ -336,8 +430,10 @@ async def checknow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 Scanned ~{stats['markets_scanned']} markets
 • {stats['milestones']} volume milestones
+• {stats['velocity']} velocity alerts
 • {stats['big_moves']} big price moves
 • {stats['new_markets']} new markets
+• {stats['watchlist']} watchlist updates
 
 Alerts sent: {stats['alerts_sent']}"""
 
@@ -373,6 +469,9 @@ async def main() -> None:
     application.add_handler(CommandHandler("checknow", checknow_command))
     application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CommandHandler("seed", seed_command))
+    application.add_handler(CommandHandler("watch", watch_command))
+    application.add_handler(CommandHandler("unwatch", unwatch_command))
+    application.add_handler(CommandHandler("watchlist", watchlist_command))
 
     # Add callback handler for inline buttons
     application.add_handler(CallbackQueryHandler(settings_callback))

@@ -4,7 +4,7 @@ Detects volume milestones, price movements, and new markets.
 """
 
 import logging
-from config import BIG_MOVE_THRESHOLD, VOLUME_THRESHOLDS
+from config import BIG_MOVE_THRESHOLD, VOLUME_THRESHOLDS, VELOCITY_THRESHOLDS
 from polymarket import get_unique_events, get_popular_markets, get_all_markets_paginated
 from database import (
     is_market_seen,
@@ -384,6 +384,65 @@ async def check_volume_milestones(
     return milestones_crossed
 
 
+async def check_velocity_alerts(
+    target_count: int = 500,
+    thresholds: list[int] = None,
+) -> list[dict]:
+    """
+    Check for markets with high velocity (money flowing in fast).
+    This catches breaking news - markets gaining $10K+/hr.
+
+    Args:
+        target_count: How many markets to fetch
+        thresholds: Velocity thresholds to check ($/hr)
+
+    Returns:
+        List of dicts with market info and velocity details
+    """
+    if thresholds is None:
+        thresholds = VELOCITY_THRESHOLDS
+
+    # Fetch markets
+    events = await get_all_markets_paginated(
+        target_count=target_count,
+        include_spam=False
+    )
+
+    # Get volume deltas for last hour
+    slugs = [e.get("slug") for e in events if e.get("slug")]
+    deltas = get_volume_deltas_bulk(slugs, hours=1)
+
+    velocity_alerts = []
+    min_threshold = min(thresholds)
+
+    for event in events:
+        slug = event.get("slug")
+        if not slug or slug not in deltas:
+            continue
+
+        velocity = deltas[slug]
+
+        # Only care about positive velocity above minimum threshold
+        if velocity >= min_threshold:
+            # Find the highest threshold crossed
+            crossed = [t for t in thresholds if velocity >= t]
+            if crossed:
+                velocity_alerts.append({
+                    "title": event.get("title"),
+                    "slug": slug,
+                    "velocity": velocity,
+                    "threshold": max(crossed),
+                    "total_volume": event.get("total_volume", 0),
+                    "yes_price": event.get("yes_price", 0),
+                    "tags": event.get("tags", []),
+                })
+
+    # Sort by velocity (highest first)
+    velocity_alerts.sort(key=lambda x: x["velocity"], reverse=True)
+
+    return velocity_alerts
+
+
 def format_volume_milestone_alert(milestone: dict) -> str:
     """Format a volume milestone for Telegram message."""
     title = milestone.get("title", "Unknown")
@@ -477,6 +536,31 @@ def format_bundled_big_moves(moves: list[dict]) -> str:
 
         lines.append(f"- {title}")
         lines.append(f"  {old_price:.0f}% -> {new_price:.0f}% ({change_str}) | {volume_str}")
+        lines.append(f"  polymarket.com/event/{slug}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def format_bundled_velocity(alerts: list[dict]) -> str:
+    """Format multiple velocity alerts into one bundled message."""
+    if not alerts:
+        return ""
+
+    lines = ["Money Moving Fast", ""]
+
+    for a in alerts:
+        title = a.get("title", "Unknown")[:45]
+        velocity = a.get("velocity", 0)
+        total_volume = a.get("total_volume", 0)
+        yes_price = a.get("yes_price", 0)
+        slug = a.get("slug", "")
+
+        velocity_str = _format_volume(velocity) + "/hr"
+        total_str = _format_volume(total_volume)
+
+        lines.append(f"- {title}")
+        lines.append(f"  {velocity_str} flowing in | Total: {total_str} | YES: {yes_price:.0f}%")
         lines.append(f"  polymarket.com/event/{slug}")
         lines.append("")
 

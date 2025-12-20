@@ -102,6 +102,18 @@ def init_database() -> None:
         )
     """)
 
+    # Watchlist - users can watch specific markets for any price move
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS watchlist (
+            telegram_id INTEGER NOT NULL,
+            event_slug TEXT NOT NULL,
+            title TEXT,
+            last_price REAL,
+            added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (telegram_id, event_slug)
+        )
+    """)
+
     # Volume milestones - track which thresholds each market has crossed
     # Once a market crosses $10K, we record it so we never alert again for $10K
     cursor.execute("""
@@ -452,6 +464,73 @@ def filter_unseen_markets(telegram_id: int, markets: list[dict], alert_type: str
     conn.close()
 
     return [m for m in markets if m.get("slug") not in seen_slugs]
+
+
+# ============================================
+# Watchlist functions
+# ============================================
+
+def add_to_watchlist(telegram_id: int, event_slug: str, title: str, current_price: float) -> bool:
+    """Add a market to user's watchlist. Returns True if added, False if already exists."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR IGNORE INTO watchlist (telegram_id, event_slug, title, last_price) VALUES (?, ?, ?, ?)",
+        (telegram_id, event_slug, title, current_price)
+    )
+    added = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return added
+
+
+def remove_from_watchlist(telegram_id: int, event_slug: str) -> bool:
+    """Remove a market from user's watchlist. Returns True if removed."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM watchlist WHERE telegram_id = ? AND event_slug = ?",
+        (telegram_id, event_slug)
+    )
+    removed = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    return removed
+
+
+def get_watchlist(telegram_id: int) -> list[dict]:
+    """Get all markets in user's watchlist."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT event_slug, title, last_price, added_at FROM watchlist WHERE telegram_id = ?",
+        (telegram_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def get_all_watched_markets() -> list[dict]:
+    """Get all watched markets across all users (for scheduler)."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT telegram_id, event_slug, title, last_price FROM watchlist")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
+
+
+def update_watchlist_price(telegram_id: int, event_slug: str, new_price: float) -> None:
+    """Update the last known price for a watched market."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE watchlist SET last_price = ? WHERE telegram_id = ? AND event_slug = ?",
+        (new_price, telegram_id, event_slug)
+    )
+    conn.commit()
+    conn.close()
 
 
 def get_alerts_sent_in_last_hour(telegram_id: int, alert_type: str = None) -> int:

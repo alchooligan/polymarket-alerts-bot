@@ -37,6 +37,15 @@ VOLUME_THRESHOLDS = [
     1_000_000,  # $1M - massive
 ]
 
+# Velocity alert thresholds (dollars gained per hour)
+# Catches breaking news - money flowing in fast
+VELOCITY_THRESHOLDS = [
+    10_000,     # $10K/hr - something's happening
+    25_000,     # $25K/hr - news breaking
+    50_000,     # $50K/hr - major event
+    100_000,    # $100K/hr - huge story
+]
+
 # Alert limits per cycle (safety net to prevent spam)
 ALERT_CAP_PER_CYCLE = 10  # Max individual alerts per type per cycle
 MARKETS_TO_SCAN = 500  # How many markets to fetch with pagination

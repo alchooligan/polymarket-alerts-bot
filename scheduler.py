@@ -15,15 +15,19 @@ from database import (
     save_volume_snapshots_bulk,
     filter_unseen_markets,
     mark_user_alerted_bulk,
+    get_all_watched_markets,
+    update_watchlist_price,
 )
 from polymarket import get_all_markets_paginated
 from alerts import (
     check_new_markets,
     check_price_movements,
     check_volume_milestones,
+    check_velocity_alerts,
     format_bundled_milestones,
     format_bundled_big_moves,
     format_bundled_new_markets,
+    format_bundled_velocity,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +70,8 @@ async def run_alert_cycle(app: Application) -> dict:
         "new_markets": 0,
         "big_moves": 0,
         "milestones": 0,
+        "velocity": 0,
+        "watchlist": 0,
         "alerts_sent": 0,
     }
 
@@ -187,6 +193,70 @@ async def run_alert_cycle(app: Application) -> dict:
                 if sent:
                     stats["alerts_sent"] += 1
                     mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "milestone")
+
+    # Check for velocity alerts (money moving fast - breaking news)
+    if new_market_users:
+        logger.info(f"Checking velocity alerts for {len(new_market_users)} users...")
+        velocity_alerts = await check_velocity_alerts(target_count=MARKETS_TO_SCAN)
+        stats["velocity"] = len(velocity_alerts)
+
+        if velocity_alerts:
+            # Per-user filtering
+            for user in new_market_users:
+                user_id = user["telegram_id"]
+                user_velocity = filter_unseen_markets(user_id, velocity_alerts, "velocity")
+
+                if not user_velocity:
+                    continue
+
+                to_send = user_velocity[:ALERT_CAP_PER_CYCLE]
+                overflow = len(user_velocity) - len(to_send)
+
+                message = format_bundled_velocity(to_send)
+                if overflow > 0:
+                    message += f"\n\n+{overflow} more fast-moving markets"
+
+                sent = await send_alert_to_user(app, user_id, message, "velocity_bundle", None)
+                if sent:
+                    stats["alerts_sent"] += 1
+                    mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "velocity")
+
+    # Check watchlist price changes (any movement alerts the user)
+    watched = get_all_watched_markets()
+    if watched:
+        logger.info(f"Checking {len(watched)} watched markets...")
+
+        # Build a map of current prices from already-fetched events
+        price_map = {e.get("slug"): e.get("yes_price", 0) for e in events if e.get("slug")}
+
+        for item in watched:
+            user_id = item["telegram_id"]
+            slug = item["event_slug"]
+            title = item.get("title", "Unknown")
+            last_price = item.get("last_price", 0)
+
+            current_price = price_map.get(slug)
+            if current_price is None:
+                continue
+
+            # Check for any price change (1% minimum to avoid noise)
+            change = current_price - last_price
+            if abs(change) >= 1:
+                stats["watchlist"] += 1
+
+                change_str = f"+{change:.0f}%" if change > 0 else f"{change:.0f}%"
+                message = f"""Watchlist Alert
+
+- {title}
+  YES: {last_price:.0f}% → {current_price:.0f}% ({change_str})
+  polymarket.com/event/{slug}"""
+
+                sent = await send_alert_to_user(app, user_id, message, "watchlist", slug)
+                if sent:
+                    stats["alerts_sent"] += 1
+
+                # Update the stored price
+                update_watchlist_price(user_id, slug, current_price)
 
     logger.info("Alert cycle complete")
     return stats
