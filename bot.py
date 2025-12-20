@@ -57,6 +57,7 @@ Watchlist:
 Settings:
 /settings - Toggle push alerts
 /checknow - Manual scan
+/how - How everything works (detailed)
 
 Push alerts (every 5 min):
 • Volume milestones ($100K+)
@@ -65,6 +66,186 @@ Push alerts (every 5 min):
 • Watchlist moves (5%+)"""
 
     await update.message.reply_text(welcome_message)
+
+
+async def how_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle the /how command - detailed explanation of how everything works.
+    Split into multiple messages for readability.
+    """
+    # Message 1: Overview
+    msg1 = """HOW THIS BOT WORKS (1/5)
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+ARCHITECTURE:
+Every 5 minutes, the bot:
+1. Fetches ~500 markets from Polymarket API
+2. Saves volume snapshots to database
+3. Compares current state to previous state
+4. Detects signals (milestones, velocity, etc.)
+5. Filters per-user (no duplicate alerts)
+6. Sends bundled Telegram messages
+
+DATA STORAGE:
+• SQLite database on Railway persistent volume
+• Survives redeploys (your data is safe)
+• Tracks: snapshots, baselines, milestones, user alerts
+
+SPORTS FILTER:
+All alerts/commands exclude sports/esports markets.
+Pattern matching on slugs (nfl-, nba-, ufc-) and
+titles (vs, match, Super Bowl, etc.).
+Reason: No information edge on sports betting."""
+
+    # Message 2: Push Alerts
+    msg2 = """HOW PUSH ALERTS WORK (2/5)
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. VOLUME MILESTONES ($100K, $250K, $500K, $1M)
+━━━
+How it works:
+• We track each market's "baseline" volume
+• Every cycle, compare: previous < threshold <= current
+• If crossed, alert once per threshold per market
+• You'll NEVER get the same milestone alert twice
+
+Example:
+• Market at $80K → $120K = crosses $100K = ALERT
+• Market at $120K → $130K = no new threshold = silent
+• Market at $450K → $520K = crosses $500K = ALERT
+
+Why these thresholds:
+• $100K = serious money, filters out noise
+• $1M = massive, rare but important
+
+2. DISCOVERIES (first-seen + $25K+)
+━━━
+How it works:
+• When we first see a market in our scan
+• AND it already has $25K+ volume
+• Alert: "this launched big, don't miss it"
+
+Why:
+• Markets can launch on weekends
+• By Monday, they have $50K but we never saw them
+• Discovery catches these so you don't miss them"""
+
+    # Message 3: More Push Alerts
+    msg3 = """HOW PUSH ALERTS WORK (3/5)
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+3. CLOSING SOON (<12h + $5K/hr velocity)
+━━━
+How it works:
+• Market ends in less than 12 hours
+• AND has $5K+/hour flowing in right now
+• Alert: "last-minute action before resolution"
+
+Why:
+• People bet near resolution when they have info
+• $5K/hr on a closing market = someone knows something
+• Tighter window (12h not 24h) = more signal
+
+4. WATCHLIST (5% price move)
+━━━
+How it works:
+• You add markets with /watch <slug>
+• We track last_price for each watched market
+• If price moves 5%+ from last alert, notify you
+• After alerting, we update last_price
+
+Example:
+• You watch "trump-pardon" at YES: 60%
+• It moves to 66% (+6%) = ALERT
+• New baseline is 66%
+• It moves to 69% (+3%) = silent (under 5%)
+• It moves to 72% (+6% from 66%) = ALERT"""
+
+    # Message 4: On-Demand Commands
+    msg4 = """HOW COMMANDS WORK (4/5)
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+/hot [1h|6h|24h] - VELOCITY LEADERS
+━━━
+How it works:
+• Compares current volume to volume N hours ago
+• Difference = velocity ($/hr)
+• Ranks top 20 by velocity
+• Sports excluded
+
+Example output:
+1. Trump pardon Biden?
+   +$45K/hr | Total: $234K | YES: 89%
+
+/underdogs - CONTRARIAN PLAYS
+━━━
+How it works (NEW SMART LOGIC):
+• YES price < 20% (underdog)
+• Total volume >= $10K (real market)
+• Velocity > 10% of total volume
+  (not absolute - RELATIVE to size)
+
+Why relative velocity matters:
+• Old logic: $1K/hr minimum = too low
+• New logic: $50K market with $5K/hr = 10% = interesting
+• $5M market with $5K/hr = 0.1% = noise
+
+/new [24h|48h] - RECENTLY ADDED
+━━━
+How it works:
+• Queries database for first_seen_at timestamp
+• Returns markets added in last N hours
+• Sorted by volume (highest first)
+• Sports excluded"""
+
+    # Message 5: Technical Details
+    msg5 = """TECHNICAL DETAILS (5/5)
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+DEDUPLICATION:
+• user_alerts table tracks (user, market, alert_type)
+• You never get the same alert twice
+• New users don't get flooded with old milestones
+
+VOLUME SNAPSHOTS:
+• Stored every 5 minutes
+• Used to calculate velocity (delta over time)
+• Kept for historical comparison
+
+VOLUME BASELINES:
+• One row per market (latest known volume)
+• Used for milestone delta detection
+• Updated after each cycle
+
+API CALLS:
+• Polymarket Gamma API (public, no auth)
+• Paginated: 100 markets per request
+• We fetch 5 pages = 500 markets
+
+THRESHOLDS SUMMARY:
+━━━
+• Milestones: $100K, $250K, $500K, $1M
+• Discovery: $25K on first sight
+• Closing soon: <12h + $5K/hr
+• Watchlist: 5% price change
+• Underdog: YES<20%, vol>$10K, velocity>10% of vol
+• Hot: any positive velocity, ranked
+
+SCHEDULER:
+• APScheduler (async)
+• Runs every 5 minutes
+• Daily digest at 9am UTC
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+Questions? Check the code:
+github.com/alchooligan/polymarket-alerts-bot"""
+
+    # Send all messages
+    await update.message.reply_text(msg1)
+    await update.message.reply_text(msg2)
+    await update.message.reply_text(msg3)
+    await update.message.reply_text(msg4)
+    await update.message.reply_text(msg5)
 
 
 async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -752,6 +933,7 @@ async def main() -> None:
 
     # Add command handlers
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("how", how_command))
     application.add_handler(CommandHandler("top", top_command))
     application.add_handler(CommandHandler("markets", top_command))  # Alias for backwards compatibility
     application.add_handler(CommandHandler("discover", discover_command))
