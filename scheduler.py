@@ -31,10 +31,14 @@ from alerts import (
     check_price_movements,
     check_volume_milestones,
     check_velocity_alerts,
+    check_underdog_alerts,
+    check_closing_soon_alerts,
     format_bundled_milestones,
     format_bundled_big_moves,
     format_bundled_new_markets,
     format_bundled_velocity,
+    format_bundled_underdogs,
+    format_bundled_closing_soon,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,6 +82,8 @@ async def run_alert_cycle(app: Application) -> dict:
         "big_moves": 0,
         "milestones": 0,
         "velocity": 0,
+        "underdogs": 0,
+        "closing_soon": 0,
         "watchlist": 0,
         "alerts_sent": 0,
     }
@@ -228,7 +234,51 @@ async def run_alert_cycle(app: Application) -> dict:
                     stats["alerts_sent"] += 1
                     mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "velocity")
 
-    # Check watchlist price changes (any movement alerts the user)
+    # Check for underdog alerts (YES <20% but money flowing)
+    if new_market_users:
+        logger.info("Checking underdog alerts...")
+        underdogs = await check_underdog_alerts(target_count=MARKETS_TO_SCAN)
+        stats["underdogs"] = len(underdogs)
+
+        if underdogs:
+            for user in new_market_users:
+                user_id = user["telegram_id"]
+                user_underdogs = filter_unseen_markets(user_id, underdogs, "underdog")
+
+                if not user_underdogs:
+                    continue
+
+                to_send = user_underdogs[:ALERT_CAP_PER_CYCLE]
+                message = format_bundled_underdogs(to_send)
+
+                sent = await send_alert_to_user(app, user_id, message, "underdog_bundle", None)
+                if sent:
+                    stats["alerts_sent"] += 1
+                    mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "underdog")
+
+    # Check for closing soon alerts (markets ending in 24h with action)
+    if new_market_users:
+        logger.info("Checking closing soon alerts...")
+        closing = await check_closing_soon_alerts(target_count=MARKETS_TO_SCAN)
+        stats["closing_soon"] = len(closing)
+
+        if closing:
+            for user in new_market_users:
+                user_id = user["telegram_id"]
+                user_closing = filter_unseen_markets(user_id, closing, "closing_soon")
+
+                if not user_closing:
+                    continue
+
+                to_send = user_closing[:ALERT_CAP_PER_CYCLE]
+                message = format_bundled_closing_soon(to_send)
+
+                sent = await send_alert_to_user(app, user_id, message, "closing_bundle", None)
+                if sent:
+                    stats["alerts_sent"] += 1
+                    mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "closing_soon")
+
+    # Check watchlist price changes (5% moves)
     watched = get_all_watched_markets()
     if watched:
         logger.info(f"Checking {len(watched)} watched markets...")
@@ -246,9 +296,9 @@ async def run_alert_cycle(app: Application) -> dict:
             if current_price is None:
                 continue
 
-            # Check for any price change (1% minimum to avoid noise)
+            # Check for significant price change (5% to avoid noise)
             change = current_price - last_price
-            if abs(change) >= 1:
+            if abs(change) >= 5:
                 stats["watchlist"] += 1
 
                 change_str = f"+{change:.0f}%" if change > 0 else f"{change:.0f}%"

@@ -542,6 +542,184 @@ def format_bundled_big_moves(moves: list[dict]) -> str:
     return "\n".join(lines).strip()
 
 
+async def check_underdog_alerts(
+    target_count: int = 500,
+    max_price: float = 20,
+    min_velocity: float = 1000,
+) -> list[dict]:
+    """
+    Find underdog markets: YES price <20% but gaining volume.
+    These are contrarian plays where money is flowing against consensus.
+
+    Args:
+        target_count: How many markets to fetch
+        max_price: Maximum YES price to qualify as underdog (default 20%)
+        min_velocity: Minimum $/hr velocity to show interest
+
+    Returns:
+        List of underdog markets with velocity data
+    """
+    # Fetch markets
+    events = await get_all_markets_paginated(
+        target_count=target_count,
+        include_spam=False
+    )
+
+    # Get volume deltas
+    slugs = [e.get("slug") for e in events if e.get("slug")]
+    deltas = get_volume_deltas_bulk(slugs, hours=1)
+
+    underdogs = []
+
+    for event in events:
+        slug = event.get("slug")
+        yes_price = event.get("yes_price", 50)
+        total_volume = event.get("total_volume", 0)
+
+        if not slug or slug not in deltas:
+            continue
+
+        velocity = deltas[slug]
+
+        # Underdog criteria: low YES price + positive velocity
+        if yes_price <= max_price and velocity >= min_velocity:
+            underdogs.append({
+                "title": event.get("title"),
+                "slug": slug,
+                "yes_price": yes_price,
+                "velocity": velocity,
+                "total_volume": total_volume,
+                "tags": event.get("tags", []),
+            })
+
+    # Sort by velocity (most action first)
+    underdogs.sort(key=lambda x: x["velocity"], reverse=True)
+
+    return underdogs
+
+
+async def check_closing_soon_alerts(
+    target_count: int = 500,
+    hours_until_close: int = 24,
+    min_velocity: float = 2000,
+) -> list[dict]:
+    """
+    Find markets closing within 24 hours that have volume activity.
+    Last-minute action before resolution.
+
+    Args:
+        target_count: How many markets to fetch
+        hours_until_close: Max hours until market closes
+        min_velocity: Minimum $/hr to qualify
+
+    Returns:
+        List of closing-soon markets with activity
+    """
+    from datetime import datetime, timezone
+
+    # Fetch markets
+    events = await get_all_markets_paginated(
+        target_count=target_count,
+        include_spam=False
+    )
+
+    # Get volume deltas
+    slugs = [e.get("slug") for e in events if e.get("slug")]
+    deltas = get_volume_deltas_bulk(slugs, hours=1)
+
+    closing_soon = []
+    now = datetime.now(timezone.utc)
+
+    for event in events:
+        slug = event.get("slug")
+        end_date_str = event.get("end_date") or event.get("endDate")
+
+        if not slug or not end_date_str:
+            continue
+
+        # Parse end date
+        try:
+            # Handle various date formats
+            if "T" in str(end_date_str):
+                end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+            else:
+                continue
+        except:
+            continue
+
+        # Check if closing within threshold
+        hours_left = (end_date - now).total_seconds() / 3600
+        if hours_left <= 0 or hours_left > hours_until_close:
+            continue
+
+        velocity = deltas.get(slug, 0)
+        if velocity < min_velocity:
+            continue
+
+        closing_soon.append({
+            "title": event.get("title"),
+            "slug": slug,
+            "yes_price": event.get("yes_price", 0),
+            "hours_left": hours_left,
+            "velocity": velocity,
+            "total_volume": event.get("total_volume", 0),
+            "tags": event.get("tags", []),
+        })
+
+    # Sort by hours left (most urgent first)
+    closing_soon.sort(key=lambda x: x["hours_left"])
+
+    return closing_soon
+
+
+def format_bundled_underdogs(alerts: list[dict]) -> str:
+    """Format underdog alerts into bundled message."""
+    if not alerts:
+        return ""
+
+    lines = ["Underdog Alert (YES <20% but money flowing)", ""]
+
+    for a in alerts:
+        title = a.get("title", "Unknown")[:40]
+        yes_price = a.get("yes_price", 0)
+        velocity = a.get("velocity", 0)
+        slug = a.get("slug", "")
+
+        vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+
+        lines.append(f"- {title}")
+        lines.append(f"  YES: {yes_price:.0f}% | {vel_str}")
+        lines.append(f"  polymarket.com/event/{slug}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def format_bundled_closing_soon(alerts: list[dict]) -> str:
+    """Format closing soon alerts into bundled message."""
+    if not alerts:
+        return ""
+
+    lines = ["Closing Soon (action before resolution)", ""]
+
+    for a in alerts:
+        title = a.get("title", "Unknown")[:40]
+        yes_price = a.get("yes_price", 0)
+        hours_left = a.get("hours_left", 0)
+        velocity = a.get("velocity", 0)
+        slug = a.get("slug", "")
+
+        time_str = f"{hours_left:.0f}h left" if hours_left >= 1 else f"{hours_left*60:.0f}m left"
+        vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+
+        lines.append(f"- {title}")
+        lines.append(f"  {time_str} | YES: {yes_price:.0f}% | {vel_str}")
+        lines.append(f"  polymarket.com/event/{slug}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
 def format_bundled_velocity(alerts: list[dict]) -> str:
     """Format multiple velocity alerts into one bundled message."""
     if not alerts:

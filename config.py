@@ -40,6 +40,7 @@ VOLUME_THRESHOLDS = [
 # Velocity alert thresholds (dollars gained per hour)
 # Catches breaking news - money flowing in fast
 VELOCITY_THRESHOLDS = [
+    5_000,      # $5K/hr - early action
     10_000,     # $10K/hr - something's happening
     25_000,     # $25K/hr - news breaking
     50_000,     # $50K/hr - major event
