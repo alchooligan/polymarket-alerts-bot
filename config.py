@@ -107,3 +107,31 @@ SPORTS_TITLE_KEYWORDS = [
     "UFC", "boxing", "fight",
     "Dota", "CS:GO", "League of Legends", "Valorant",
 ]
+
+# Category filters - maps user-friendly names to tag/slug patterns
+CATEGORY_FILTERS = {
+    "crypto": {
+        "tags": ["crypto", "cryptocurrency", "bitcoin", "ethereum", "defi", "web3"],
+        "title_keywords": ["Bitcoin", "BTC", "Ethereum", "ETH", "crypto", "token", "blockchain"],
+    },
+    "politics": {
+        "tags": ["politics", "elections", "government", "congress", "senate", "president"],
+        "title_keywords": ["Trump", "Biden", "Congress", "Senate", "election", "vote", "president", "governor"],
+    },
+    "tech": {
+        "tags": ["technology", "tech", "ai", "artificial-intelligence", "software"],
+        "title_keywords": ["AI", "OpenAI", "Google", "Apple", "Microsoft", "Tesla", "Meta", "Amazon", "tech"],
+    },
+    "econ": {
+        "tags": ["economics", "economy", "finance", "fed", "inflation", "rates"],
+        "title_keywords": ["Fed", "inflation", "GDP", "recession", "rates", "stock", "market", "economy"],
+    },
+    "entertainment": {
+        "tags": ["entertainment", "movies", "music", "celebrity", "awards"],
+        "title_keywords": ["Oscar", "Grammy", "Emmy", "movie", "film", "celebrity", "album"],
+    },
+    "world": {
+        "tags": ["world", "international", "geopolitics", "war", "conflict"],
+        "title_keywords": ["Russia", "Ukraine", "China", "war", "NATO", "UN", "Israel", "Gaza"],
+    },
+}

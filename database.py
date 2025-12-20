@@ -925,6 +925,61 @@ def get_volume_snapshot_count() -> int:
     return row["count"] if row else 0
 
 
+def get_price_deltas_bulk(event_slugs: list[str], hours: int = 6) -> dict[str, dict]:
+    """
+    Get price changes for multiple markets over a time window.
+    Returns {slug: {"current": X, "old": Y, "delta": Z}} dict.
+
+    Optimized: Single query with CTEs instead of N*2 queries.
+    """
+    if not event_slugs:
+        return {}
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    placeholders = ",".join("?" * len(event_slugs))
+    time_threshold = f"-{hours} hours"
+
+    query = f"""
+    WITH current_prices AS (
+        SELECT event_slug, yes_price,
+               ROW_NUMBER() OVER (PARTITION BY event_slug ORDER BY recorded_at DESC) as rn
+        FROM price_snapshots
+        WHERE event_slug IN ({placeholders})
+    ),
+    old_prices AS (
+        SELECT event_slug, yes_price,
+               ROW_NUMBER() OVER (PARTITION BY event_slug ORDER BY recorded_at DESC) as rn
+        FROM price_snapshots
+        WHERE event_slug IN ({placeholders})
+        AND recorded_at <= datetime('now', ?)
+    )
+    SELECT
+        c.event_slug,
+        c.yes_price as current_price,
+        o.yes_price as old_price,
+        (c.yes_price - o.yes_price) as delta
+    FROM current_prices c
+    JOIN old_prices o ON c.event_slug = o.event_slug
+    WHERE c.rn = 1 AND o.rn = 1
+    """
+
+    params = list(event_slugs) + list(event_slugs) + [time_threshold]
+    cursor.execute(query, params)
+
+    results = {}
+    for row in cursor.fetchall():
+        results[row["event_slug"]] = {
+            "current": row["current_price"],
+            "old": row["old_price"],
+            "delta": row["delta"],
+        }
+
+    conn.close()
+    return results
+
+
 # ============================================
 # Test / Debug
 # ============================================

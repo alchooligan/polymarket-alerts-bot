@@ -19,9 +19,10 @@ from database import (
     remove_from_watchlist,
     get_watchlist,
     get_recently_seen_slugs,
+    get_price_deltas_bulk,
 )
 from scheduler import start_scheduler, stop_scheduler, run_manual_cycle, run_daily_digest
-from alerts import check_underdog_alerts, format_bundled_underdogs, filter_sports, _format_volume
+from alerts import check_underdog_alerts, format_bundled_underdogs, filter_sports, filter_by_category, get_available_categories, _format_volume
 
 # Set up logging
 logging.basicConfig(
@@ -44,10 +45,15 @@ Sports markets are filtered out (no edge there).
 
 On-demand commands:
 /hot - Fastest moving (velocity)
-/hot 24h - Velocity over 24 hours
-/new - Markets added in last 24h
-/underdogs - YES <20% with action
 /discover - Rising markets
+/movers - Biggest price swings
+/quiet - Sleeping giants
+/underdogs - Contrarian plays
+/new - Recently added markets
+
+Category filters (add to any command):
+crypto, politics, tech, econ, world
+Example: /hot crypto or /movers politics
 
 Watchlist:
 /watch <slug> - Track a market
@@ -56,7 +62,7 @@ Watchlist:
 Settings:
 /settings - Toggle push alerts
 /checknow - Manual scan
-/how - How everything works (detailed)
+/how - Detailed explanation
 
 Push alerts (every 5 min):
 • Volume milestones ($100K+)
@@ -79,7 +85,6 @@ AUTOMATIC ALERTS (every 5 min):
 
 Volume Milestones
 → Alert when market crosses $100K, $250K, $500K, or $1M
-→ Example: "Market X just crossed $100K"
 → You only get each milestone once per market
 
 Discoveries
@@ -98,42 +103,64 @@ Watchlist
 
 ON-DEMAND COMMANDS:
 
-/hot
-→ Top 20 markets by money flowing in (velocity)
-→ Try: /hot 6h or /hot 24h for longer windows
+/hot [time] [category]
+→ Markets by velocity (money flowing in)
+→ Try: /hot 6h, /hot 24h, /hot crypto
+
+/discover [category]
+→ Rising markets (<$500K) with momentum
+→ Shows velocity, volume changes, price history
+
+/movers [category]
+→ Biggest price swings in 24h (±5%+)
+→ Split into GAINERS and LOSERS
+
+/quiet [category]
+→ Sleeping giants: big ($100K+) but quiet
+→ Could wake up anytime
 
 /underdogs
-→ Markets with YES <20% but significant action
-→ Contrarian plays where money disagrees with odds
+→ YES <20% but price rising (+2% in 24h)
+→ Contrarian money moving the needle
 
-/new
-→ Markets added in last 24 hours
-→ Try: /new 48h for longer window
-
-/watch <slug>
-→ Track a specific market
-→ Example: /watch trump-pardon-hunter-biden
-
-/watchlist
-→ See all your tracked markets
-
-/settings
-→ Turn push alerts ON/OFF
-
-/checknow
-→ Run a manual scan
+/new [time]
+→ Recently added markets
+→ Try: /new 48h
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-NOTE: Sports/esports markets are excluded everywhere.
+CATEGORY FILTERS:
+crypto, politics, tech, econ, world, entertainment
+
+Example: /hot politics or /movers crypto
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+NOTE: Sports/esports markets excluded.
 No edge on sports betting."""
 
     await update.message.reply_text(msg)
 
 
 async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /discover command - show markets that are waking up (velocity-based)."""
-    await update.message.reply_text("Finding markets waking up...")
+    """
+    Handle the /discover command - show markets that are waking up with rich data.
+    Usage: /discover [category]
+    Categories: crypto, politics, tech, econ, entertainment, world
+    """
+    # Parse category from args
+    category = None
+    available_cats = get_available_categories()
+
+    for arg in context.args:
+        if arg.lower() in available_cats:
+            category = arg.lower()
+            break
+
+    status_msg = "Finding markets waking up"
+    if category:
+        status_msg += f" [{category}]"
+    await update.message.reply_text(status_msg + "...")
 
     try:
         # Check if we have enough snapshots
@@ -155,11 +182,22 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # Filter out sports
         events = filter_sports(events)
 
-        # Get volume deltas for last hour
-        slugs = [e["slug"] for e in events]
-        deltas = get_volume_deltas_bulk(slugs, hours=1)
+        # Apply category filter if specified
+        if category:
+            events = filter_by_category(events, category)
 
-        if not deltas:
+        slugs = [e["slug"] for e in events]
+
+        # Get volume deltas for multiple windows
+        deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
+        deltas_6h = get_volume_deltas_bulk(slugs, hours=6)
+        deltas_24h = get_volume_deltas_bulk(slugs, hours=24)
+
+        # Get price deltas
+        price_deltas_6h = get_price_deltas_bulk(slugs, hours=6)
+        price_deltas_24h = get_price_deltas_bulk(slugs, hours=24)
+
+        if not deltas_1h:
             await update.message.reply_text(
                 "No velocity data yet. Need ~1 hour of snapshots.\n"
                 "Run /checknow periodically to build history."
@@ -170,8 +208,8 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         markets_with_delta = []
         for event in events:
             slug = event["slug"]
-            if slug in deltas:
-                delta = deltas[slug]
+            if slug in deltas_1h:
+                delta_1h = deltas_1h[slug]
                 total_volume = event["total_volume"]
 
                 # Filter out giants (>$500K total volume) to force discovery
@@ -179,51 +217,87 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     continue
 
                 # Only include positive velocity (growing markets)
-                if delta > 0:
+                if delta_1h > 0:
+                    # Calculate velocity as % of market
+                    velocity_pct = (delta_1h / total_volume * 100) if total_volume > 0 else 0
+
                     markets_with_delta.append({
                         **event,
-                        "delta_1h": delta,
+                        "delta_1h": delta_1h,
+                        "delta_6h": deltas_6h.get(slug, 0),
+                        "delta_24h": deltas_24h.get(slug, 0),
+                        "velocity_pct": velocity_pct,
+                        "price_6h": price_deltas_6h.get(slug, {}),
+                        "price_24h": price_deltas_24h.get(slug, {}),
                     })
 
-        # Sort by delta (highest velocity first)
+        # Sort by 1h velocity (highest first)
         markets_with_delta.sort(key=lambda x: x["delta_1h"], reverse=True)
 
         if not markets_with_delta:
+            cat_msg = f" in {category}" if category else ""
             await update.message.reply_text(
-                "No waking-up markets found right now.\n"
+                f"No waking-up markets{cat_msg} found right now.\n"
                 "Try again later when markets start moving."
             )
             return
 
-        # Format response
-        response_lines = ["Waking Up (by 1h velocity):\n"]
+        # Format response with rich data
+        header = "Waking Up (velocity + data)"
+        if category:
+            header += f" [{category}]"
+        response_lines = [header, ""]
 
         for event in markets_with_delta[:10]:
-            title = event["title"][:40]
+            title = event["title"][:45]
             yes_price = event["yes_price"]
-            delta = event["delta_1h"]
+            delta_1h = event["delta_1h"]
+            delta_6h = event["delta_6h"]
             total = event["total_volume"]
+            velocity_pct = event["velocity_pct"]
             slug = event["slug"]
+            price_6h = event.get("price_6h", {})
+            price_24h = event.get("price_24h", {})
 
-            # Format delta
-            if delta >= 1_000:
-                delta_str = f"+${delta / 1_000:.1f}K"
+            # Format velocity
+            vel_str = f"+${delta_1h/1000:.1f}K/hr" if delta_1h >= 1000 else f"+${delta_1h:.0f}/hr"
+
+            # Format total volume
+            vol_str = _format_volume(total)
+
+            # Format 6h volume change
+            if delta_6h > 0:
+                delta_6h_pct = (delta_6h / (total - delta_6h) * 100) if (total - delta_6h) > 0 else 0
+                vol_6h_str = f"+${delta_6h/1000:.0f}K" if delta_6h >= 1000 else f"+${delta_6h:.0f}"
+                vol_change_str = f"{vol_6h_str} in 6h (+{delta_6h_pct:.0f}%)"
             else:
-                delta_str = f"+${delta:.0f}"
+                vol_change_str = "no 6h data"
 
-            # Format total
-            if total >= 1_000:
-                total_str = f"${total / 1_000:.0f}K"
-            else:
-                total_str = f"${total:.0f}"
+            # Format price changes
+            price_parts = []
+            if price_6h:
+                p6_delta = price_6h.get("delta", 0)
+                p6_old = price_6h.get("old", 0)
+                if p6_delta != 0:
+                    p6_sign = "+" if p6_delta > 0 else ""
+                    price_parts.append(f"was {p6_old:.0f}% 6h ago ({p6_sign}{p6_delta:.0f}%)")
+            if price_24h:
+                p24_delta = price_24h.get("delta", 0)
+                p24_old = price_24h.get("old", 0)
+                if p24_delta != 0:
+                    p24_sign = "+" if p24_delta > 0 else ""
+                    price_parts.append(f"was {p24_old:.0f}% 24h ago ({p24_sign}{p24_delta:.0f}%)")
 
-            market_text = f"""- {title}
-  {delta_str}/hr | Total: {total_str} | YES: {yes_price:.0f}%
-  polymarket.com/event/{slug}
-"""
-            response_lines.append(market_text)
+            price_str = " | ".join(price_parts) if price_parts else "no price history"
 
-        response = "\n".join(response_lines)
+            response_lines.append(f"- {title}")
+            response_lines.append(f"  Velocity: {vel_str} ({velocity_pct:.1f}%/hr of market)")
+            response_lines.append(f"  Volume: {vol_str} total | {vol_change_str}")
+            response_lines.append(f"  Price: {yes_price:.0f}% now | {price_str}")
+            response_lines.append(f"  polymarket.com/event/{slug}")
+            response_lines.append("")
+
+        response = "\n".join(response_lines).strip()
         await update.message.reply_text(response, disable_web_page_preview=True)
 
     except Exception as e:
@@ -234,19 +308,22 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 async def underdogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle the /underdogs command - show contrarian plays.
-    Markets with YES <20% but significant velocity relative to their size.
+    Markets with YES <20% where price is actually rising (someone betting against consensus).
     """
-    await update.message.reply_text("Finding underdogs...")
+    await update.message.reply_text("Finding underdogs with rising prices...")
 
     try:
-        # Get underdogs with new smart logic
+        # Get underdogs with price movement logic
         underdogs = await check_underdog_alerts(target_count=500)
 
         if not underdogs:
             await update.message.reply_text(
                 "No underdogs found right now.\n\n"
-                "Underdogs require: YES < 20%, volume >= $10K, and\n"
-                "velocity >= 10% of total volume (significant action)."
+                "Underdogs require:\n"
+                "- YES price < 20%\n"
+                "- Volume >= $50K\n"
+                "- Price went UP +2% in last 24h\n\n"
+                "This catches contrarian money moving the needle."
             )
             return
 
@@ -261,27 +338,36 @@ async def underdogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handle the /hot command - show markets by velocity (money moving fast).
-    Usage: /hot [1h|6h|24h] - defaults to 1h
+    Handle the /hot command - show markets by velocity with rich data.
+    Usage: /hot [1h|6h|24h] [category] - defaults to 1h, no filter
+    Categories: crypto, politics, tech, econ, entertainment, world
     """
-    # Parse time window from args
+    # Parse time window and category from args
     hours = 1
     time_label = "1h"
+    category = None
 
-    if context.args:
-        arg = context.args[0].lower()
-        if arg in ["6h", "6"]:
+    available_cats = get_available_categories()
+
+    for arg in context.args:
+        arg_lower = arg.lower()
+        if arg_lower in ["6h", "6"]:
             hours = 6
             time_label = "6h"
-        elif arg in ["24h", "24"]:
+        elif arg_lower in ["24h", "24"]:
             hours = 24
             time_label = "24h"
+        elif arg_lower in available_cats:
+            category = arg_lower
 
-    await update.message.reply_text(f"Finding hottest markets ({time_label})...")
+    status_msg = f"Finding hottest markets ({time_label})"
+    if category:
+        status_msg += f" [{category}]"
+    await update.message.reply_text(status_msg + "...")
 
     try:
         # Fetch markets
-        events = await get_all_markets_paginated(target_count=500, include_spam=False)
+        events = await get_all_markets_paginated(target_count=2000, include_spam=False)
 
         if not events:
             await update.message.reply_text("No markets found. Try again later.")
@@ -290,9 +376,17 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Filter out sports
         events = filter_sports(events)
 
-        # Get volume deltas for specified time window
+        # Apply category filter if specified
+        if category:
+            events = filter_by_category(events, category)
+
         slugs = [e.get("slug") for e in events if e.get("slug")]
+
+        # Get volume deltas for specified time window
         deltas = get_volume_deltas_bulk(slugs, hours=hours)
+
+        # Get price deltas for the same window
+        price_deltas = get_price_deltas_bulk(slugs, hours=hours)
 
         if not deltas:
             await update.message.reply_text(
@@ -307,6 +401,11 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             slug = event.get("slug")
             if slug in deltas and deltas[slug] > 0:
                 velocity = deltas[slug]
+                total_volume = event.get("total_volume", 0)
+
+                # Calculate velocity as % of market
+                velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
+
                 # For multi-hour windows, normalize to per-hour rate
                 velocity_per_hour = velocity / hours if hours > 1 else velocity
 
@@ -314,51 +413,54 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     **event,
                     "velocity": velocity,
                     "velocity_per_hour": velocity_per_hour,
+                    "velocity_pct": velocity_pct / hours,  # Per hour
+                    "price_data": price_deltas.get(slug, {}),
                 })
 
         # Sort by velocity (highest first)
         hot_markets.sort(key=lambda x: x["velocity"], reverse=True)
 
         if not hot_markets:
+            cat_msg = f" in {category}" if category else ""
             await update.message.reply_text(
-                f"No markets with positive velocity in last {time_label}.\n"
+                f"No markets{cat_msg} with positive velocity in last {time_label}.\n"
                 "Markets may be quiet right now."
             )
             return
 
-        # Format top 20
-        lines = [f"Hottest Markets ({time_label})", ""]
+        # Format top 15 with rich data
+        header = f"Hottest Markets ({time_label})"
+        if category:
+            header += f" [{category}]"
+        lines = [header, ""]
 
-        for i, m in enumerate(hot_markets[:20], 1):
+        for i, m in enumerate(hot_markets[:15], 1):
             title = m.get("title", "Unknown")[:40]
             velocity = m["velocity"]
             velocity_per_hour = m["velocity_per_hour"]
+            velocity_pct = m["velocity_pct"]
             total_volume = m.get("total_volume", 0)
             yes_price = m.get("yes_price", 0)
             slug = m.get("slug", "")
+            price_data = m.get("price_data", {})
 
             # Format velocity
-            if hours > 1:
-                # Show total delta and per-hour rate
-                if velocity >= 1000:
-                    vel_str = f"+${velocity/1000:.0f}K"
-                else:
-                    vel_str = f"+${velocity:.0f}"
-                if velocity_per_hour >= 1000:
-                    rate_str = f"(${velocity_per_hour/1000:.1f}K/hr)"
-                else:
-                    rate_str = f"(${velocity_per_hour:.0f}/hr)"
-                vel_display = f"{vel_str} {rate_str}"
-            else:
-                if velocity >= 1000:
-                    vel_display = f"+${velocity/1000:.0f}K/hr"
-                else:
-                    vel_display = f"+${velocity:.0f}/hr"
+            vel_str = f"+${velocity/1000:.0f}K" if velocity >= 1000 else f"+${velocity:.0f}"
+            rate_str = f"${velocity_per_hour/1000:.1f}K/hr" if velocity_per_hour >= 1000 else f"${velocity_per_hour:.0f}/hr"
 
             vol_str = _format_volume(total_volume)
 
+            # Format price change
+            price_change = price_data.get("delta", 0)
+            if price_change != 0:
+                price_sign = "+" if price_change > 0 else ""
+                price_str = f"{price_sign}{price_change:.0f}%"
+            else:
+                price_str = "flat"
+
             lines.append(f"{i}. {title}")
-            lines.append(f"   {vel_display} | Total: {vol_str} | YES: {yes_price:.0f}%")
+            lines.append(f"   Velocity: {vel_str} in {time_label} ({rate_str}, {velocity_pct:.1f}%/hr)")
+            lines.append(f"   Volume: {vol_str} | Price: {yes_price:.0f}% ({price_str})")
             lines.append(f"   polymarket.com/event/{slug}")
             lines.append("")
 
@@ -452,6 +554,260 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     except Exception as e:
         logger.error(f"Error in new: {e}")
+        await update.message.reply_text(f"Error: {e}")
+
+
+async def quiet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle the /quiet command - find sleeping giants.
+    Big markets ($100K+) with low activity that could wake up.
+    Usage: /quiet [category]
+    """
+    # Parse category from args
+    category = None
+    available_cats = get_available_categories()
+
+    for arg in context.args:
+        if arg.lower() in available_cats:
+            category = arg.lower()
+            break
+
+    status_msg = "Finding sleeping giants"
+    if category:
+        status_msg += f" [{category}]"
+    await update.message.reply_text(status_msg + "...")
+
+    try:
+        # Fetch markets
+        events = await get_all_markets_paginated(target_count=2000, include_spam=False)
+
+        if not events:
+            await update.message.reply_text("No markets found. Try again later.")
+            return
+
+        # Filter out sports
+        events = filter_sports(events)
+
+        # Apply category filter if specified
+        if category:
+            events = filter_by_category(events, category)
+
+        slugs = [e["slug"] for e in events]
+
+        # Get volume deltas for 1h
+        deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
+
+        # Get price deltas for 24h
+        price_deltas_24h = get_price_deltas_bulk(slugs, hours=24)
+
+        sleeping_giants = []
+
+        for event in events:
+            slug = event["slug"]
+            total_volume = event["total_volume"]
+            yes_price = event["yes_price"]
+
+            # Must be a big market ($100K+)
+            if total_volume < 100_000:
+                continue
+
+            velocity = deltas_1h.get(slug, 0)
+
+            # Low velocity (<1% of market per hour)
+            velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
+            if velocity_pct > 1:
+                continue
+
+            # Stable price (moved less than ±2% in 24h)
+            price_data = price_deltas_24h.get(slug, {})
+            price_change = abs(price_data.get("delta", 0))
+            if price_change > 2:
+                continue
+
+            sleeping_giants.append({
+                **event,
+                "velocity": velocity,
+                "velocity_pct": velocity_pct,
+                "price_change_24h": price_data.get("delta", 0),
+            })
+
+        # Sort by volume (biggest first)
+        sleeping_giants.sort(key=lambda x: x["total_volume"], reverse=True)
+
+        if not sleeping_giants:
+            cat_msg = f" in {category}" if category else ""
+            await update.message.reply_text(
+                f"No sleeping giants{cat_msg} found right now.\n\n"
+                "Sleeping giants require:\n"
+                "- Volume >= $100K\n"
+                "- Velocity < 1%/hr of market\n"
+                "- Price stable (±2% in 24h)"
+            )
+            return
+
+        # Format response
+        header = "Sleeping Giants (big + quiet)"
+        if category:
+            header += f" [{category}]"
+        lines = [header, ""]
+
+        for i, m in enumerate(sleeping_giants[:15], 1):
+            title = m["title"][:40]
+            yes_price = m["yes_price"]
+            total_volume = m["total_volume"]
+            velocity_pct = m["velocity_pct"]
+            price_change = m["price_change_24h"]
+            slug = m["slug"]
+
+            vol_str = _format_volume(total_volume)
+            price_sign = "+" if price_change > 0 else ""
+
+            lines.append(f"{i}. {title}")
+            lines.append(f"   Volume: {vol_str} | YES: {yes_price:.0f}%")
+            lines.append(f"   Activity: {velocity_pct:.1f}%/hr | Price: {price_sign}{price_change:.0f}% (24h)")
+            lines.append(f"   polymarket.com/event/{slug}")
+            lines.append("")
+
+        message = "\n".join(lines).strip()
+        await update.message.reply_text(message, disable_web_page_preview=True)
+
+    except Exception as e:
+        logger.error(f"Error in quiet: {e}")
+        await update.message.reply_text(f"Error: {e}")
+
+
+async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle the /movers command - find biggest price swings.
+    Markets with the largest price changes in last 24h.
+    Usage: /movers [category]
+    """
+    # Parse category from args
+    category = None
+    available_cats = get_available_categories()
+
+    for arg in context.args:
+        if arg.lower() in available_cats:
+            category = arg.lower()
+            break
+
+    status_msg = "Finding biggest movers"
+    if category:
+        status_msg += f" [{category}]"
+    await update.message.reply_text(status_msg + "...")
+
+    try:
+        # Fetch markets
+        events = await get_all_markets_paginated(target_count=2000, include_spam=False)
+
+        if not events:
+            await update.message.reply_text("No markets found. Try again later.")
+            return
+
+        # Filter out sports
+        events = filter_sports(events)
+
+        # Apply category filter if specified
+        if category:
+            events = filter_by_category(events, category)
+
+        slugs = [e["slug"] for e in events]
+
+        # Get price deltas for 24h
+        price_deltas_24h = get_price_deltas_bulk(slugs, hours=24)
+
+        # Get velocity for context
+        deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
+
+        movers = []
+
+        for event in events:
+            slug = event["slug"]
+            total_volume = event["total_volume"]
+
+            # Need decent volume ($25K+)
+            if total_volume < 25_000:
+                continue
+
+            # Get price change
+            price_data = price_deltas_24h.get(slug, {})
+            price_change = price_data.get("delta", 0)
+            old_price = price_data.get("old", 0)
+
+            # Must have significant move (>=5%)
+            if abs(price_change) < 5:
+                continue
+
+            velocity = deltas_1h.get(slug, 0)
+
+            movers.append({
+                **event,
+                "old_price": old_price,
+                "price_change": price_change,
+                "velocity": velocity,
+            })
+
+        # Sort by absolute price change (biggest swings first)
+        movers.sort(key=lambda x: abs(x["price_change"]), reverse=True)
+
+        if not movers:
+            cat_msg = f" in {category}" if category else ""
+            await update.message.reply_text(
+                f"No big movers{cat_msg} found right now.\n\n"
+                "Movers require:\n"
+                "- Volume >= $25K\n"
+                "- Price moved >=5% in 24h"
+            )
+            return
+
+        # Split into gainers and losers
+        gainers = [m for m in movers if m["price_change"] > 0][:10]
+        losers = [m for m in movers if m["price_change"] < 0][:10]
+
+        header = "Biggest Movers (24h)"
+        if category:
+            header += f" [{category}]"
+        lines = [header, ""]
+
+        if gainers:
+            lines.append("GAINERS:")
+            for m in gainers:
+                title = m["title"][:35]
+                yes_price = m["yes_price"]
+                old_price = m["old_price"]
+                price_change = m["price_change"]
+                total_volume = m["total_volume"]
+                slug = m["slug"]
+
+                vol_str = _format_volume(total_volume)
+
+                lines.append(f"- {title}")
+                lines.append(f"  {old_price:.0f}% -> {yes_price:.0f}% (+{price_change:.0f}%) | {vol_str}")
+                lines.append(f"  polymarket.com/event/{slug}")
+                lines.append("")
+
+        if losers:
+            lines.append("LOSERS:")
+            for m in losers:
+                title = m["title"][:35]
+                yes_price = m["yes_price"]
+                old_price = m["old_price"]
+                price_change = m["price_change"]
+                total_volume = m["total_volume"]
+                slug = m["slug"]
+
+                vol_str = _format_volume(total_volume)
+
+                lines.append(f"- {title}")
+                lines.append(f"  {old_price:.0f}% -> {yes_price:.0f}% ({price_change:.0f}%) | {vol_str}")
+                lines.append(f"  polymarket.com/event/{slug}")
+                lines.append("")
+
+        message = "\n".join(lines).strip()
+        await update.message.reply_text(message, disable_web_page_preview=True)
+
+    except Exception as e:
+        logger.error(f"Error in movers: {e}")
         await update.message.reply_text(f"Error: {e}")
 
 
@@ -779,6 +1135,8 @@ async def main() -> None:
     application.add_handler(CommandHandler("underdogs", underdogs_command))
     application.add_handler(CommandHandler("hot", hot_command))
     application.add_handler(CommandHandler("new", new_command))
+    application.add_handler(CommandHandler("quiet", quiet_command))
+    application.add_handler(CommandHandler("movers", movers_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("checknow", checknow_command))
     application.add_handler(CommandHandler("debug", debug_command))
