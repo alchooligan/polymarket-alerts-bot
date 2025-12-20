@@ -76,6 +76,61 @@ async def fetch_popular_events(limit: int = 100, closed: bool = False) -> list[d
         return []
 
 
+async def fetch_events_paginated(
+    target_count: int = 500,
+    order: str = "volume",
+    closed: bool = False,
+    page_size: int = 100
+) -> list[dict]:
+    """
+    Fetch events with pagination until we have enough.
+
+    Args:
+        target_count: Target number of events to fetch
+        order: Sort order ("volume" for popular, "id" for recent)
+        closed: Whether to include closed markets
+        page_size: Events per API call (max 100)
+
+    Returns:
+        List of event dictionaries
+    """
+    all_events = []
+    offset = 0
+    max_pages = 10  # Safety limit: 10 pages * 100 = 1000 max events
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        for _ in range(max_pages):
+            params = {
+                "order": order,
+                "ascending": "false",
+                "closed": str(closed).lower(),
+                "limit": page_size,
+                "offset": offset,
+            }
+
+            try:
+                response = await client.get(EVENTS_ENDPOINT, params=params)
+                response.raise_for_status()
+                events = response.json()
+
+                if not events:
+                    # No more events to fetch
+                    break
+
+                all_events.extend(events)
+
+                if len(all_events) >= target_count:
+                    break
+
+                offset += page_size
+
+            except httpx.HTTPError as e:
+                print(f"Error fetching events at offset {offset}: {e}")
+                break
+
+    return all_events[:target_count]
+
+
 async def fetch_event_by_slug(slug: str) -> Optional[dict]:
     """
     Fetch a specific event by its slug.
@@ -386,6 +441,60 @@ async def get_popular_markets(limit: int = 100, include_spam: bool = False) -> l
                     event_map[slug]["yes_price"] = market["yes_price"]
 
     # Convert to list (already sorted by volume from API, but re-sort to be safe)
+    unique_events = list(event_map.values())
+    unique_events.sort(key=lambda x: x["total_volume"], reverse=True)
+
+    return unique_events
+
+
+async def get_all_markets_paginated(
+    target_count: int = 500,
+    include_spam: bool = False
+) -> list[dict]:
+    """
+    Fetch many markets with pagination and deduplicate by event.
+    Used for volume milestone detection to cover more of the ecosystem.
+
+    Args:
+        target_count: Target number of raw events to fetch (will dedupe after)
+        include_spam: Whether to include price prediction spam
+
+    Returns:
+        List of unique event dictionaries, sorted by volume desc
+    """
+    # Fetch with pagination
+    events = await fetch_events_paginated(
+        target_count=target_count,
+        order="volume",
+        closed=False
+    )
+
+    # Group markets by event slug (same as get_popular_markets)
+    event_map = {}
+
+    for event in events:
+        markets = extract_market_info(event)
+
+        for market in markets:
+            if not include_spam and market["is_spam"]:
+                continue
+
+            slug = market["slug"]
+
+            if slug not in event_map:
+                event_map[slug] = {
+                    "title": market["title"],
+                    "slug": slug,
+                    "yes_price": market["yes_price"],
+                    "total_volume": market["volume"],
+                    "tags": market["tags"],
+                    "end_date": market["end_date"],
+                }
+            else:
+                event_map[slug]["total_volume"] += market["volume"]
+                if market["yes_price"] > event_map[slug]["yes_price"]:
+                    event_map[slug]["yes_price"] = market["yes_price"]
+
     unique_events = list(event_map.values())
     unique_events.sort(key=lambda x: x["total_volume"], reverse=True)
 

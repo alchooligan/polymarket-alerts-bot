@@ -28,6 +28,10 @@ CHECK_INTERVAL_MINUTES = 5
 # Alert when a market crosses these for the first time
 VOLUME_THRESHOLDS = [10_000, 50_000]  # $10K, $50K
 
+# Alert limits per cycle (safety net to prevent spam)
+ALERT_CAP_PER_CYCLE = 10  # Max individual alerts per type per cycle
+MARKETS_TO_SCAN = 500  # How many markets to fetch with pagination
+
 # Database
 DATABASE_PATH = "bot_data.db"
 

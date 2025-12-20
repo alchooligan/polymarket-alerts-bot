@@ -8,7 +8,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from telegram.ext import Application
 
-from config import CHECK_INTERVAL_MINUTES
+from config import CHECK_INTERVAL_MINUTES, ALERT_CAP_PER_CYCLE, MARKETS_TO_SCAN
 from database import get_all_users_with_alerts_enabled, log_alert
 from alerts import (
     check_new_markets,
@@ -111,13 +111,20 @@ async def run_alert_cycle(app: Application) -> None:
     if new_market_users:
         logger.info(f"Checking volume milestones for {len(new_market_users)} users...")
         milestones = await check_volume_milestones(
-            limit=100,
+            target_count=MARKETS_TO_SCAN,
             record=True
         )
 
         if milestones:
-            logger.info(f"Found {len(milestones)} volume milestones, sending alerts...")
-            for milestone in milestones[:5]:  # Limit to 5 alerts per cycle
+            total_found = len(milestones)
+            logger.info(f"Found {total_found} volume milestones")
+
+            # Apply cap
+            alerts_to_send = milestones[:ALERT_CAP_PER_CYCLE]
+            overflow_count = max(0, total_found - ALERT_CAP_PER_CYCLE)
+
+            # Send individual alerts
+            for milestone in alerts_to_send:
                 message = format_volume_milestone_alert(milestone)
                 for user in new_market_users:
                     await send_alert_to_user(
@@ -126,6 +133,18 @@ async def run_alert_cycle(app: Application) -> None:
                         message,
                         "volume_milestone",
                         milestone.get("slug")
+                    )
+
+            # Send digest if we hit the cap
+            if overflow_count > 0:
+                digest_msg = f"📊 +{overflow_count} more volume milestones this cycle.\nUse /markets to see top markets."
+                for user in new_market_users:
+                    await send_alert_to_user(
+                        app,
+                        user["telegram_id"],
+                        digest_msg,
+                        "volume_digest",
+                        None
                     )
 
     logger.info("Alert cycle complete")

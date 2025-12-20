@@ -3,8 +3,9 @@ Alert checking logic for Polymarket Telegram Bot.
 Detects volume milestones, price movements, and new markets.
 """
 
+import logging
 from config import BIG_MOVE_THRESHOLD, VOLUME_THRESHOLDS
-from polymarket import get_unique_events, get_popular_markets
+from polymarket import get_unique_events, get_popular_markets, get_all_markets_paginated
 from database import (
     is_market_seen,
     mark_markets_seen_bulk,
@@ -12,7 +13,14 @@ from database import (
     save_price_snapshots_bulk,
     get_uncrossed_thresholds,
     record_milestone,
+    record_milestones_bulk,
+    get_volume_baselines_bulk,
+    update_volume_baselines_bulk,
+    is_volume_seeded,
+    mark_volume_seeded,
 )
+
+logger = logging.getLogger(__name__)
 
 
 async def check_new_markets(
@@ -168,31 +176,41 @@ def format_price_move_alert(move: dict) -> str:
   polymarket.com/event/{slug}"""
 
 
-async def check_volume_milestones(
-    limit: int = 100,
-    thresholds: list[int] = None,
-    record: bool = True
-) -> list[dict]:
-    """
-    Check for markets that have crossed volume thresholds for the first time.
+# ============================================
+# Volume milestone functions (Option C: baseline + delta)
+# ============================================
 
-    This is the KEY signal - a market hitting $10K or $50K means real interest.
+async def seed_volume_baselines(
+    target_count: int = 500,
+    thresholds: list[int] = None
+) -> dict:
+    """
+    One-time seed: scan existing markets, record baselines and crossed thresholds.
+    Does NOT send any alerts. Call this on fresh deploy.
 
     Args:
-        limit: Max events to fetch from API
-        thresholds: Volume thresholds to check (default: VOLUME_THRESHOLDS from config)
-        record: If True, record milestones so we don't alert again
+        target_count: How many markets to fetch (uses pagination)
+        thresholds: Volume thresholds to track
 
     Returns:
-        List of dicts with market info and milestone details
+        Dict with stats: {"markets_scanned": N, "milestones_recorded": M}
     """
     if thresholds is None:
         thresholds = VOLUME_THRESHOLDS
 
-    # Fetch popular markets (high volume ones)
-    events = await get_popular_markets(limit=limit, include_spam=False)
+    logger.info(f"Seeding volume baselines (target: {target_count} markets)...")
 
-    milestones_crossed = []
+    # Fetch many markets with pagination
+    events = await get_all_markets_paginated(
+        target_count=target_count,
+        include_spam=False
+    )
+
+    logger.info(f"Fetched {len(events)} unique markets for seeding")
+
+    # Prepare bulk inserts
+    baselines_to_insert = []  # (slug, volume)
+    milestones_to_insert = []  # (slug, threshold, volume)
 
     for event in events:
         slug = event.get("slug")
@@ -201,26 +219,127 @@ async def check_volume_milestones(
         if not slug:
             continue
 
-        # Get thresholds this market hasn't crossed yet
-        uncrossed = get_uncrossed_thresholds(slug, thresholds)
+        # Record current volume as baseline
+        baselines_to_insert.append((slug, volume))
 
-        # Check which thresholds were just crossed
-        for threshold in uncrossed:
+        # Record all thresholds already crossed (without alerting)
+        for threshold in thresholds:
             if volume >= threshold:
-                milestones_crossed.append({
-                    "title": event.get("title"),
-                    "slug": slug,
-                    "threshold": threshold,
-                    "current_volume": volume,
-                    "yes_price": event.get("yes_price", 0),
-                    "tags": event.get("tags", []),
-                })
+                milestones_to_insert.append((slug, threshold, volume))
 
-                # Record the milestone so we don't alert again
+    # Bulk insert baselines
+    update_volume_baselines_bulk(baselines_to_insert)
+
+    # Bulk insert milestones
+    record_milestones_bulk(milestones_to_insert)
+
+    # Mark as seeded
+    mark_volume_seeded()
+
+    stats = {
+        "markets_scanned": len(events),
+        "baselines_recorded": len(baselines_to_insert),
+        "milestones_recorded": len(milestones_to_insert),
+    }
+
+    logger.info(f"Seeding complete: {stats}")
+    return stats
+
+
+async def check_volume_milestones(
+    target_count: int = 500,
+    thresholds: list[int] = None,
+    record: bool = True
+) -> list[dict]:
+    """
+    Check for markets that have ACTUALLY crossed volume thresholds.
+    Uses delta logic: previous volume < threshold <= current volume.
+
+    This is the KEY signal - a market hitting $10K or $50K means real interest.
+
+    Args:
+        target_count: How many markets to fetch (uses pagination)
+        thresholds: Volume thresholds to check
+        record: If True, record milestones and update baselines
+
+    Returns:
+        List of dicts with market info and milestone details
+    """
+    if thresholds is None:
+        thresholds = VOLUME_THRESHOLDS
+
+    # Check if we need to seed first
+    if not is_volume_seeded():
+        logger.info("Volume baselines not seeded yet, seeding now...")
+        await seed_volume_baselines(target_count=target_count, thresholds=thresholds)
+        # After seeding, no crossings to report (all existing ones were recorded)
+        return []
+
+    # Fetch markets with pagination
+    events = await get_all_markets_paginated(
+        target_count=target_count,
+        include_spam=False
+    )
+
+    # Get all slugs for bulk baseline lookup
+    slugs = [e.get("slug") for e in events if e.get("slug")]
+    baselines = get_volume_baselines_bulk(slugs)
+
+    milestones_crossed = []
+    baselines_to_update = []
+
+    for event in events:
+        slug = event.get("slug")
+        current_volume = event.get("total_volume", 0)
+
+        if not slug:
+            continue
+
+        # Get previous volume from baseline
+        previous_volume = baselines.get(slug)
+
+        if previous_volume is None:
+            # New market we haven't seen - record baseline, no alert
+            baselines_to_update.append((slug, current_volume))
+            # Record any thresholds already crossed (silently)
+            for threshold in thresholds:
+                if current_volume >= threshold:
+                    if record:
+                        record_milestone(slug, threshold, current_volume)
+            continue
+
+        # Find thresholds that were CROSSED (prev < threshold <= current)
+        crossed_thresholds = []
+        for threshold in thresholds:
+            if previous_volume < threshold <= current_volume:
+                crossed_thresholds.append(threshold)
                 if record:
-                    record_milestone(slug, threshold, volume)
+                    record_milestone(slug, threshold, current_volume)
 
-    # Sort by threshold (higher thresholds = more significant)
+        if crossed_thresholds:
+            # Alert for highest threshold, but note if multiple crossed
+            highest = max(crossed_thresholds)
+            also_crossed = [t for t in crossed_thresholds if t != highest]
+
+            milestones_crossed.append({
+                "title": event.get("title"),
+                "slug": slug,
+                "threshold": highest,
+                "also_crossed": also_crossed,  # Other thresholds crossed in same check
+                "previous_volume": previous_volume,
+                "current_volume": current_volume,
+                "yes_price": event.get("yes_price", 0),
+                "tags": event.get("tags", []),
+            })
+
+        # Update baseline with current volume
+        baselines_to_update.append((slug, current_volume))
+
+    # Bulk update baselines
+    if record and baselines_to_update:
+        update_volume_baselines_bulk(baselines_to_update)
+
+    # Sort by threshold (higher = more significant)
     milestones_crossed.sort(key=lambda x: x["threshold"], reverse=True)
 
     return milestones_crossed
@@ -230,31 +349,33 @@ def format_volume_milestone_alert(milestone: dict) -> str:
     """Format a volume milestone for Telegram message."""
     title = milestone.get("title", "Unknown")
     threshold = milestone.get("threshold", 0)
+    also_crossed = milestone.get("also_crossed", [])
     volume = milestone.get("current_volume", 0)
     yes_price = milestone.get("yes_price", 0)
     slug = milestone.get("slug", "")
 
-    # Format threshold nicely
-    if threshold >= 1_000_000:
-        threshold_str = f"${threshold / 1_000_000:.0f}M"
-    elif threshold >= 1_000:
-        threshold_str = f"${threshold / 1_000:.0f}K"
-    else:
-        threshold_str = f"${threshold:.0f}"
+    def format_amount(amount: float) -> str:
+        if amount >= 1_000_000:
+            return f"${amount / 1_000_000:.1f}M"
+        elif amount >= 1_000:
+            return f"${amount / 1_000:.0f}K"
+        else:
+            return f"${amount:.0f}"
 
-    # Format current volume
-    if volume >= 1_000_000:
-        volume_str = f"${volume / 1_000_000:.1f}M"
-    elif volume >= 1_000:
-        volume_str = f"${volume / 1_000:.1f}K"
-    else:
-        volume_str = f"${volume:.0f}"
+    threshold_str = format_amount(threshold)
+    volume_str = format_amount(volume)
+
+    # Build crossed text
+    crossed_text = f"Crossed {threshold_str}"
+    if also_crossed:
+        also_str = ", ".join(format_amount(t) for t in sorted(also_crossed))
+        crossed_text += f" (also passed {also_str})"
 
     return f"""Volume Milestone
 
 - {title}
-  Crossed {threshold_str} (now {volume_str})
-  YES: {yes_price:.0f}%
+  {crossed_text}
+  Now at {volume_str} | YES: {yes_price:.0f}%
   polymarket.com/event/{slug}"""
 
 

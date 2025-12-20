@@ -109,6 +109,25 @@ def init_database() -> None:
         ON volume_milestones(event_slug)
     """)
 
+    # Volume baselines - stores last known volume for delta detection
+    # This enables true "crossing" detection: was below threshold, now above
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS volume_baselines (
+            event_slug TEXT PRIMARY KEY,
+            last_volume REAL NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # System flags - for tracking one-time operations like seeding
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS system_flags (
+            flag_name TEXT PRIMARY KEY,
+            flag_value TEXT,
+            set_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
     conn.close()
     print("Database initialized.")
@@ -414,6 +433,140 @@ def get_uncrossed_thresholds(event_slug: str, all_thresholds: list[int]) -> list
     """Given a list of thresholds, return which ones this market hasn't crossed yet."""
     crossed = set(get_crossed_thresholds(event_slug))
     return [t for t in all_thresholds if t not in crossed]
+
+
+def record_milestones_bulk(milestones: list[tuple]) -> None:
+    """
+    Record multiple milestones at once. Used for seeding.
+    milestones: list of (event_slug, threshold, volume) tuples
+    """
+    if not milestones:
+        return
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.executemany(
+        "INSERT OR IGNORE INTO volume_milestones (event_slug, threshold, volume_at_crossing) VALUES (?, ?, ?)",
+        milestones
+    )
+    conn.commit()
+    conn.close()
+
+
+# ============================================
+# Volume baseline functions (for delta detection)
+# ============================================
+
+def get_volume_baseline(event_slug: str) -> Optional[float]:
+    """Get the last known volume for a market. Returns None if never seen."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT last_volume FROM volume_baselines WHERE event_slug = ?",
+        (event_slug,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row["last_volume"] if row else None
+
+
+def get_volume_baselines_bulk(event_slugs: list[str]) -> dict[str, float]:
+    """Get last known volumes for multiple markets. Returns {slug: volume} dict."""
+    if not event_slugs:
+        return {}
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    placeholders = ",".join("?" * len(event_slugs))
+    cursor.execute(
+        f"SELECT event_slug, last_volume FROM volume_baselines WHERE event_slug IN ({placeholders})",
+        event_slugs
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return {row["event_slug"]: row["last_volume"] for row in rows}
+
+
+def update_volume_baseline(event_slug: str, volume: float) -> None:
+    """Update or insert volume baseline for a market."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """INSERT INTO volume_baselines (event_slug, last_volume, updated_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(event_slug) DO UPDATE SET
+           last_volume = excluded.last_volume,
+           updated_at = CURRENT_TIMESTAMP""",
+        (event_slug, volume)
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_volume_baselines_bulk(volumes: list[tuple]) -> None:
+    """
+    Update or insert volume baselines for multiple markets.
+    volumes: list of (event_slug, volume) tuples
+    """
+    if not volumes:
+        return
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    for event_slug, volume in volumes:
+        cursor.execute(
+            """INSERT INTO volume_baselines (event_slug, last_volume, updated_at)
+               VALUES (?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(event_slug) DO UPDATE SET
+               last_volume = excluded.last_volume,
+               updated_at = CURRENT_TIMESTAMP""",
+            (event_slug, volume)
+        )
+    conn.commit()
+    conn.close()
+
+
+# ============================================
+# System flags (for one-time operations)
+# ============================================
+
+def get_system_flag(flag_name: str) -> Optional[str]:
+    """Get a system flag value. Returns None if not set."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT flag_value FROM system_flags WHERE flag_name = ?",
+        (flag_name,)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    return row["flag_value"] if row else None
+
+
+def set_system_flag(flag_name: str, flag_value: str = "1") -> None:
+    """Set a system flag."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """INSERT INTO system_flags (flag_name, flag_value, set_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP)
+           ON CONFLICT(flag_name) DO UPDATE SET
+           flag_value = excluded.flag_value,
+           set_at = CURRENT_TIMESTAMP""",
+        (flag_name, flag_value)
+    )
+    conn.commit()
+    conn.close()
+
+
+def is_volume_seeded() -> bool:
+    """Check if we've done the initial volume baseline seeding."""
+    return get_system_flag("volume_baselines_seeded") is not None
+
+
+def mark_volume_seeded() -> None:
+    """Mark that we've completed the initial volume baseline seeding."""
+    set_system_flag("volume_baselines_seeded", "1")
 
 
 # ============================================
