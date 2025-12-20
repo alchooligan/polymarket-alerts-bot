@@ -26,7 +26,16 @@ CHECK_INTERVAL_MINUTES = 5
 
 # Volume milestone thresholds (in dollars)
 # Alert when a market crosses these for the first time
-VOLUME_THRESHOLDS = [10_000, 50_000]  # $10K, $50K
+# More thresholds = more signals as markets grow
+VOLUME_THRESHOLDS = [
+    10_000,     # $10K - early interest
+    25_000,     # $25K - gaining traction
+    50_000,     # $50K - significant
+    100_000,    # $100K - serious money
+    250_000,    # $250K - major market
+    500_000,    # $500K - whale territory
+    1_000_000,  # $1M - massive
+]
 
 # Alert limits per cycle (safety net to prevent spam)
 ALERT_CAP_PER_CYCLE = 10  # Max individual alerts per type per cycle
