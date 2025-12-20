@@ -419,6 +419,94 @@ def format_volume_milestone_alert(milestone: dict) -> str:
 
 
 # ============================================
+# Bundled alert formatters (Phase 3)
+# ============================================
+
+def _format_volume(amount: float) -> str:
+    """Helper to format volume amounts."""
+    if amount >= 1_000_000:
+        return f"${amount / 1_000_000:.1f}M"
+    elif amount >= 1_000:
+        return f"${amount / 1_000:.0f}K"
+    else:
+        return f"${amount:.0f}"
+
+
+def format_bundled_milestones(milestones: list[dict]) -> str:
+    """Format multiple volume milestones into one bundled message."""
+    if not milestones:
+        return ""
+
+    lines = ["Volume Milestones", ""]
+
+    for m in milestones:
+        title = m.get("title", "Unknown")[:45]
+        threshold = m.get("threshold", 0)
+        volume = m.get("current_volume", 0)
+        yes_price = m.get("yes_price", 0)
+        slug = m.get("slug", "")
+
+        threshold_str = _format_volume(threshold)
+        volume_str = _format_volume(volume)
+
+        lines.append(f"- {title}")
+        lines.append(f"  Crossed {threshold_str} | Now {volume_str} | YES: {yes_price:.0f}%")
+        lines.append(f"  polymarket.com/event/{slug}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def format_bundled_big_moves(moves: list[dict]) -> str:
+    """Format multiple big moves into one bundled message."""
+    if not moves:
+        return ""
+
+    lines = ["Big Price Moves", ""]
+
+    for m in moves:
+        title = m.get("title", "Unknown")[:45]
+        old_price = m.get("old_price", 0)
+        new_price = m.get("new_price", 0)
+        change = m.get("change", 0)
+        volume = m.get("total_volume", 0)
+        slug = m.get("slug", "")
+
+        change_str = f"+{change:.0f}%" if change > 0 else f"{change:.0f}%"
+        volume_str = _format_volume(volume)
+
+        lines.append(f"- {title}")
+        lines.append(f"  {old_price:.0f}% -> {new_price:.0f}% ({change_str}) | {volume_str}")
+        lines.append(f"  polymarket.com/event/{slug}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def format_bundled_new_markets(markets: list[dict]) -> str:
+    """Format multiple new markets into one bundled message."""
+    if not markets:
+        return ""
+
+    lines = ["New Markets", ""]
+
+    for m in markets:
+        title = m.get("title", "Unknown")[:45]
+        volume = m.get("total_volume", 0)
+        yes_price = m.get("yes_price", 0)
+        slug = m.get("slug", "")
+
+        volume_str = _format_volume(volume)
+
+        lines.append(f"- {title}")
+        lines.append(f"  YES: {yes_price:.0f}% | Volume: {volume_str}")
+        lines.append(f"  polymarket.com/event/{slug}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+# ============================================
 # Test function - run this file directly to test
 # ============================================
 

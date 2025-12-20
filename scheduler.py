@@ -15,9 +15,9 @@ from alerts import (
     check_new_markets,
     check_price_movements,
     check_volume_milestones,
-    format_new_market_alert,
-    format_price_move_alert,
-    format_volume_milestone_alert,
+    format_bundled_milestones,
+    format_bundled_big_moves,
+    format_bundled_new_markets,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,19 +97,21 @@ async def run_alert_cycle(app: Application) -> dict:
         stats["new_markets"] = len(new_markets)
 
         if new_markets:
-            logger.info(f"Found {len(new_markets)} new markets, sending alerts...")
-            for market in new_markets[:5]:  # Limit to 5 alerts per cycle
-                message = format_new_market_alert(market)
-                for user in new_market_users:
-                    sent = await send_alert_to_user(
-                        app,
-                        user["telegram_id"],
-                        message,
-                        "new_market",
-                        market.get("slug")
-                    )
-                    if sent:
-                        stats["alerts_sent"] += 1
+            # Apply cap and send ONE bundled message
+            to_send = new_markets[:ALERT_CAP_PER_CYCLE]
+            overflow = len(new_markets) - len(to_send)
+
+            message = format_bundled_new_markets(to_send)
+            if overflow > 0:
+                message += f"\n\n+{overflow} more new markets"
+
+            logger.info(f"Sending bundled new markets alert ({len(to_send)} items)")
+            for user in new_market_users:
+                sent = await send_alert_to_user(
+                    app, user["telegram_id"], message, "new_market_bundle", None
+                )
+                if sent:
+                    stats["alerts_sent"] += 1
 
     # Check for price movements
     if big_move_users:
@@ -123,19 +125,21 @@ async def run_alert_cycle(app: Application) -> dict:
         stats["big_moves"] = len(big_moves)
 
         if big_moves:
-            logger.info(f"Found {len(big_moves)} big moves, sending alerts...")
-            for move in big_moves[:5]:  # Limit to 5 alerts per cycle
-                message = format_price_move_alert(move)
-                for user in big_move_users:
-                    sent = await send_alert_to_user(
-                        app,
-                        user["telegram_id"],
-                        message,
-                        "big_move",
-                        move.get("slug")
-                    )
-                    if sent:
-                        stats["alerts_sent"] += 1
+            # Apply cap and send ONE bundled message
+            to_send = big_moves[:ALERT_CAP_PER_CYCLE]
+            overflow = len(big_moves) - len(to_send)
+
+            message = format_bundled_big_moves(to_send)
+            if overflow > 0:
+                message += f"\n\n+{overflow} more big moves"
+
+            logger.info(f"Sending bundled big moves alert ({len(to_send)} items)")
+            for user in big_move_users:
+                sent = await send_alert_to_user(
+                    app, user["telegram_id"], message, "big_move_bundle", None
+                )
+                if sent:
+                    stats["alerts_sent"] += 1
 
     # Check for volume milestones (the KEY signal)
     # Send to users with new_markets_enabled for now
@@ -149,38 +153,21 @@ async def run_alert_cycle(app: Application) -> dict:
         stats["markets_scanned"] = MARKETS_TO_SCAN  # Approximate
 
         if milestones:
-            total_found = len(milestones)
-            logger.info(f"Found {total_found} volume milestones")
+            # Apply cap and send ONE bundled message
+            to_send = milestones[:ALERT_CAP_PER_CYCLE]
+            overflow = len(milestones) - len(to_send)
 
-            # Apply cap
-            alerts_to_send = milestones[:ALERT_CAP_PER_CYCLE]
-            overflow_count = max(0, total_found - ALERT_CAP_PER_CYCLE)
+            message = format_bundled_milestones(to_send)
+            if overflow > 0:
+                message += f"\n\n+{overflow} more volume milestones. Use /top to explore."
 
-            # Send individual alerts
-            for milestone in alerts_to_send:
-                message = format_volume_milestone_alert(milestone)
-                for user in new_market_users:
-                    sent = await send_alert_to_user(
-                        app,
-                        user["telegram_id"],
-                        message,
-                        "volume_milestone",
-                        milestone.get("slug")
-                    )
-                    if sent:
-                        stats["alerts_sent"] += 1
-
-            # Send digest if we hit the cap
-            if overflow_count > 0:
-                digest_msg = f"📊 +{overflow_count} more volume milestones this cycle.\nUse /top to see top markets."
-                for user in new_market_users:
-                    await send_alert_to_user(
-                        app,
-                        user["telegram_id"],
-                        digest_msg,
-                        "volume_digest",
-                        None
-                    )
+            logger.info(f"Sending bundled milestones alert ({len(to_send)} items)")
+            for user in new_market_users:
+                sent = await send_alert_to_user(
+                    app, user["telegram_id"], message, "milestone_bundle", None
+                )
+                if sent:
+                    stats["alerts_sent"] += 1
 
     logger.info("Alert cycle complete")
     return stats
