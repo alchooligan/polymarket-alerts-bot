@@ -8,7 +8,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 from config import TELEGRAM_BOT_TOKEN, CHECK_INTERVAL_MINUTES
-from polymarket import get_unique_events, get_popular_markets, get_all_markets_paginated
+from polymarket import get_unique_events, get_all_markets_paginated
 from database import (
     init_database,
     get_or_create_user,
@@ -43,7 +43,6 @@ I'll help you track prediction markets on Polymarket.
 Sports markets are filtered out (no edge there).
 
 On-demand commands:
-/top - Biggest markets by volume
 /hot - Fastest moving (velocity)
 /hot 24h - Velocity over 24 hours
 /new - Markets added in last 24h
@@ -111,9 +110,6 @@ ON-DEMAND COMMANDS:
 → Markets added in last 24 hours
 → Try: /new 48h for longer window
 
-/top
-→ Biggest markets by total volume
-
 /watch <slug>
 → Track a specific market
 → Example: /watch trump-pardon-hunter-biden
@@ -133,49 +129,6 @@ NOTE: Sports/esports markets are excluded everywhere.
 No edge on sports betting."""
 
     await update.message.reply_text(msg)
-
-
-async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /top command - show 5 top markets by volume."""
-    await update.message.reply_text("Fetching top markets...")
-
-    try:
-        # Fetch popular markets (sorted by volume from API)
-        events = await get_popular_markets(limit=100, include_spam=False)
-
-        if not events:
-            await update.message.reply_text("No markets found. Try again later.")
-            return
-
-        # Show top 5 events by volume
-        response_lines = ["Top Markets by Volume:\n"]
-
-        for event in events[:5]:
-            title = event["title"]
-            yes_price = event["yes_price"]
-            volume = event["total_volume"]
-            slug = event["slug"]
-
-            # Format volume nicely
-            if volume >= 1_000_000:
-                volume_str = f"${volume / 1_000_000:.1f}M"
-            elif volume >= 1_000:
-                volume_str = f"${volume / 1_000:.1f}K"
-            else:
-                volume_str = f"${volume:.0f}"
-
-            market_text = f"""- {title}
-  YES: {yes_price:.0f}% | Volume: {volume_str}
-  polymarket.com/event/{slug}
-"""
-            response_lines.append(market_text)
-
-        response = "\n".join(response_lines)
-        await update.message.reply_text(response, disable_web_page_preview=True)
-
-    except Exception as e:
-        logger.error(f"Error fetching markets: {e}")
-        await update.message.reply_text("Error fetching markets. Please try again later.")
 
 
 async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -528,8 +481,7 @@ Push alerts include:
 
 On-demand commands (no toggle needed):
 • /hot - velocity leaders
-• /underdogs - contrarian plays
-• /top - biggest markets"""
+• /underdogs - contrarian plays"""
 
     keyboard = build_settings_keyboard(user)
     await update.message.reply_text(text, reply_markup=keyboard)
@@ -563,8 +515,7 @@ Push alerts include:
 
 On-demand commands (no toggle needed):
 • /hot - velocity leaders
-• /underdogs - contrarian plays
-• /top - biggest markets"""
+• /underdogs - contrarian plays"""
 
     await query.edit_message_text(text, reply_markup=keyboard)
 
@@ -821,8 +772,6 @@ async def main() -> None:
     # Add command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("how", how_command))
-    application.add_handler(CommandHandler("top", top_command))
-    application.add_handler(CommandHandler("markets", top_command))  # Alias for backwards compatibility
     application.add_handler(CommandHandler("discover", discover_command))
     application.add_handler(CommandHandler("underdogs", underdogs_command))
     application.add_handler(CommandHandler("hot", hot_command))
