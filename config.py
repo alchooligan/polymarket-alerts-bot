@@ -32,8 +32,7 @@ VOLUME_THRESHOLDS = [10_000, 50_000]  # $10K, $50K
 ALERT_CAP_PER_CYCLE = 10  # Max individual alerts per type per cycle
 MARKETS_TO_SCAN = 500  # How many markets to fetch with pagination
 
-# Database
-# Use /data for Railway persistent volume, fallback to local for dev
+# Database - uses Railway persistent volume at /data, local fallback for dev
 import os
 DATABASE_PATH = "/data/bot_data.db" if os.path.exists("/data") else "bot_data.db"
 
