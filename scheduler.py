@@ -20,6 +20,7 @@ from database import (
     get_all_users_with_alerts_enabled,
     log_alert,
     save_volume_snapshots_bulk,
+    save_price_snapshots_bulk,
     filter_unseen_markets,
     mark_user_alerted_bulk,
     get_all_watched_markets,
@@ -88,8 +89,9 @@ async def run_alert_cycle(app: Application) -> dict:
         events = await get_all_markets_paginated(target_count=MARKETS_TO_SCAN, include_spam=False)
         if events:
             save_volume_snapshots_bulk(events)
+            save_price_snapshots_bulk(events)  # Critical for /movers, /underdogs, price history
             stats["markets_scanned"] = len(events)
-            logger.info(f"Saved {len(events)} volume snapshots")
+            logger.info(f"Saved {len(events)} volume + price snapshots")
         else:
             logger.warning("API returned 0 events - velocity/watchlist checks will be skipped")
             return stats  # Can't do anything useful without market data
