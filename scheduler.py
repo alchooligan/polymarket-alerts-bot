@@ -63,10 +63,23 @@ async def run_alert_cycle(app: Application) -> dict:
         "alerts_sent": 0,
     }
 
+    # Save volume snapshots FIRST - we need this data regardless of users
+    try:
+        logger.info("Fetching markets for snapshots...")
+        events = await get_all_markets_paginated(target_count=MARKETS_TO_SCAN, include_spam=False)
+        if events:
+            save_volume_snapshots_bulk(events)
+            stats["markets_scanned"] = len(events)
+            logger.info(f"Saved {len(events)} volume snapshots")
+        else:
+            logger.warning("No events returned from API")
+    except Exception as e:
+        logger.error(f"Failed to save volume snapshots: {e}")
+
     # Get users with alerts enabled
     users = get_all_users_with_alerts_enabled()
     if not users:
-        logger.info("No users with alerts enabled, skipping cycle")
+        logger.info("No users with alerts enabled, skipping alert checks")
         return stats
 
     # Separate users by alert type
@@ -168,16 +181,6 @@ async def run_alert_cycle(app: Application) -> dict:
                         "volume_digest",
                         None
                     )
-
-    # Save volume snapshots for velocity detection (Phase 1)
-    # Do this regardless of user settings - we need historical data
-    try:
-        events = await get_all_markets_paginated(target_count=MARKETS_TO_SCAN, include_spam=False)
-        save_volume_snapshots_bulk(events)
-        stats["markets_scanned"] = len(events)
-        logger.info(f"Saved {len(events)} volume snapshots")
-    except Exception as e:
-        logger.error(f"Failed to save volume snapshots: {e}")
 
     logger.info("Alert cycle complete")
     return stats
