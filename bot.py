@@ -273,38 +273,17 @@ async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     slug = context.args[0].lower().strip()
     user_id = update.effective_user.id
 
-    # Try to find the market to get its title and current price
-    try:
-        # Search more markets to find the one user wants
-        events = await get_all_markets_paginated(target_count=500, include_spam=False)
-        market = next((e for e in events if e.get("slug", "").lower() == slug), None)
+    # Just add it - we'll find price data on next scan
+    added = add_to_watchlist(user_id, slug, slug, 0)
 
-        if not market:
-            await update.message.reply_text(
-                f"Market '{slug}' not found.\n\n"
-                "Make sure you're using the exact slug from the URL."
-            )
-            return
-
-        title = market.get("title", "Unknown")
-        current_price = market.get("yes_price", 0)
-
-        added = add_to_watchlist(user_id, slug, title, current_price)
-
-        if added:
-            await update.message.reply_text(
-                f"Added to watchlist:\n\n"
-                f"- {title}\n"
-                f"  YES: {current_price:.0f}%\n\n"
-                f"You'll get alerts for any price movement.\n"
-                f"Use /watchlist to see all watched markets."
-            )
-        else:
-            await update.message.reply_text(f"'{slug}' is already in your watchlist.")
-
-    except Exception as e:
-        logger.error(f"Error in watch command: {e}")
-        await update.message.reply_text(f"Error: {e}")
+    if added:
+        await update.message.reply_text(
+            f"Added to watchlist: {slug}\n\n"
+            f"You'll get alerts when this market moves.\n"
+            f"Use /watchlist to see all watched markets."
+        )
+    else:
+        await update.message.reply_text(f"'{slug}' is already in your watchlist.")
 
 
 async def unwatch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -369,22 +348,36 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         cursor.execute("SELECT COUNT(*) as count FROM volume_milestones")
         milestone_count = cursor.fetchone()["count"]
 
-        # Get most recent snapshot time
-        cursor.execute("SELECT MAX(recorded_at) as latest FROM volume_snapshots")
-        latest = cursor.fetchone()["latest"]
+        # Get snapshot time range
+        cursor.execute("SELECT MIN(recorded_at) as oldest, MAX(recorded_at) as latest FROM volume_snapshots")
+        row = cursor.fetchone()
+        oldest = row["oldest"]
+        latest = row["latest"]
 
         # Check seeded flag
         seeded = is_volume_seeded()
+
+        # Check user settings
+        user_id = update.effective_user.id
+        cursor.execute("SELECT * FROM users WHERE telegram_id = ?", (user_id,))
+        user_row = cursor.fetchone()
+        if user_row:
+            user_info = f"new_markets={user_row['new_markets_enabled']}, big_moves={user_row['big_moves_enabled']}"
+        else:
+            user_info = "NOT IN DB"
 
         conn.close()
 
         response = f"""Database Stats
 
-Volume snapshots: {snapshot_count}
-Volume baselines: {baseline_count}
-Volume milestones: {milestone_count}
-Latest snapshot: {latest or 'None'}
-Seeded flag: {seeded}"""
+Snapshots: {snapshot_count}
+Oldest: {oldest or 'None'}
+Latest: {latest or 'None'}
+Baselines: {baseline_count}
+Milestones: {milestone_count}
+Seeded: {seeded}
+
+Your settings: {user_info}"""
 
         await update.message.reply_text(response)
     except Exception as e:
