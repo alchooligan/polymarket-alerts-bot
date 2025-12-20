@@ -33,7 +33,9 @@ ALERT_CAP_PER_CYCLE = 10  # Max individual alerts per type per cycle
 MARKETS_TO_SCAN = 500  # How many markets to fetch with pagination
 
 # Database
-DATABASE_PATH = "bot_data.db"
+# Use /data for Railway persistent volume, fallback to local for dev
+import os
+DATABASE_PATH = "/data/bot_data.db" if os.path.exists("/data") else "bot_data.db"
 
 # Spam filter patterns - crypto price prediction markets to exclude
 SPAM_CRYPTO_TICKERS = [
