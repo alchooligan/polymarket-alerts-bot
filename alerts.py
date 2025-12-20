@@ -1,15 +1,17 @@
 """
 Alert checking logic for Polymarket Telegram Bot.
-Detects new markets and big price movements.
+Detects volume milestones, price movements, and new markets.
 """
 
-from config import BIG_MOVE_THRESHOLD
-from polymarket import get_unique_events
+from config import BIG_MOVE_THRESHOLD, VOLUME_THRESHOLDS
+from polymarket import get_unique_events, get_popular_markets
 from database import (
     is_market_seen,
     mark_markets_seen_bulk,
     get_price_from_hours_ago,
     save_price_snapshots_bulk,
+    get_uncrossed_thresholds,
+    record_milestone,
 )
 
 
@@ -163,6 +165,96 @@ def format_price_move_alert(move: dict) -> str:
 - {title}
   YES: {old_price:.0f}% -> {new_price:.0f}% ({change_str})
   Volume: {volume_str}
+  polymarket.com/event/{slug}"""
+
+
+async def check_volume_milestones(
+    limit: int = 100,
+    thresholds: list[int] = None,
+    record: bool = True
+) -> list[dict]:
+    """
+    Check for markets that have crossed volume thresholds for the first time.
+
+    This is the KEY signal - a market hitting $10K or $50K means real interest.
+
+    Args:
+        limit: Max events to fetch from API
+        thresholds: Volume thresholds to check (default: VOLUME_THRESHOLDS from config)
+        record: If True, record milestones so we don't alert again
+
+    Returns:
+        List of dicts with market info and milestone details
+    """
+    if thresholds is None:
+        thresholds = VOLUME_THRESHOLDS
+
+    # Fetch popular markets (high volume ones)
+    events = await get_popular_markets(limit=limit, include_spam=False)
+
+    milestones_crossed = []
+
+    for event in events:
+        slug = event.get("slug")
+        volume = event.get("total_volume", 0)
+
+        if not slug:
+            continue
+
+        # Get thresholds this market hasn't crossed yet
+        uncrossed = get_uncrossed_thresholds(slug, thresholds)
+
+        # Check which thresholds were just crossed
+        for threshold in uncrossed:
+            if volume >= threshold:
+                milestones_crossed.append({
+                    "title": event.get("title"),
+                    "slug": slug,
+                    "threshold": threshold,
+                    "current_volume": volume,
+                    "yes_price": event.get("yes_price", 0),
+                    "tags": event.get("tags", []),
+                })
+
+                # Record the milestone so we don't alert again
+                if record:
+                    record_milestone(slug, threshold, volume)
+
+    # Sort by threshold (higher thresholds = more significant)
+    milestones_crossed.sort(key=lambda x: x["threshold"], reverse=True)
+
+    return milestones_crossed
+
+
+def format_volume_milestone_alert(milestone: dict) -> str:
+    """Format a volume milestone for Telegram message."""
+    title = milestone.get("title", "Unknown")
+    threshold = milestone.get("threshold", 0)
+    volume = milestone.get("current_volume", 0)
+    yes_price = milestone.get("yes_price", 0)
+    slug = milestone.get("slug", "")
+
+    # Format threshold nicely
+    if threshold >= 1_000_000:
+        threshold_str = f"${threshold / 1_000_000:.0f}M"
+    elif threshold >= 1_000:
+        threshold_str = f"${threshold / 1_000:.0f}K"
+    else:
+        threshold_str = f"${threshold:.0f}"
+
+    # Format current volume
+    if volume >= 1_000_000:
+        volume_str = f"${volume / 1_000_000:.1f}M"
+    elif volume >= 1_000:
+        volume_str = f"${volume / 1_000:.1f}K"
+    else:
+        volume_str = f"${volume:.0f}"
+
+    return f"""Volume Milestone
+
+- {title}
+  Crossed {threshold_str} (now {volume_str})
+  YES: {yes_price:.0f}%
   polymarket.com/event/{slug}"""
 
 

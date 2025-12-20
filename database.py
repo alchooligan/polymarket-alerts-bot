@@ -90,6 +90,25 @@ def init_database() -> None:
         )
     """)
 
+    # Volume milestones - track which thresholds each market has crossed
+    # Once a market crosses $10K, we record it so we never alert again for $10K
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS volume_milestones (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_slug TEXT NOT NULL,
+            threshold INTEGER NOT NULL,
+            crossed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            volume_at_crossing REAL,
+            UNIQUE(event_slug, threshold)
+        )
+    """)
+
+    # Index for fast lookups
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_volume_milestones_slug
+        ON volume_milestones(event_slug)
+    """)
+
     conn.commit()
     conn.close()
     print("Database initialized.")
@@ -347,6 +366,54 @@ def get_alerts_sent_in_last_hour(telegram_id: int, alert_type: str = None) -> in
     result = cursor.fetchone()
     conn.close()
     return result["count"] if result else 0
+
+
+# ============================================
+# Volume milestone functions
+# ============================================
+
+def has_crossed_threshold(event_slug: str, threshold: int) -> bool:
+    """Check if a market has already crossed a specific volume threshold."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT 1 FROM volume_milestones WHERE event_slug = ? AND threshold = ?",
+        (event_slug, threshold)
+    )
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
+
+
+def get_crossed_thresholds(event_slug: str) -> list[int]:
+    """Get all thresholds a market has already crossed."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT threshold FROM volume_milestones WHERE event_slug = ?",
+        (event_slug,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [row["threshold"] for row in rows]
+
+
+def record_milestone(event_slug: str, threshold: int, volume: float) -> None:
+    """Record that a market has crossed a volume threshold."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR IGNORE INTO volume_milestones (event_slug, threshold, volume_at_crossing) VALUES (?, ?, ?)",
+        (event_slug, threshold, volume)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_uncrossed_thresholds(event_slug: str, all_thresholds: list[int]) -> list[int]:
+    """Given a list of thresholds, return which ones this market hasn't crossed yet."""
+    crossed = set(get_crossed_thresholds(event_slug))
+    return [t for t in all_thresholds if t not in crossed]
 
 
 # ============================================

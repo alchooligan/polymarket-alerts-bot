@@ -13,8 +13,10 @@ from database import get_all_users_with_alerts_enabled, log_alert
 from alerts import (
     check_new_markets,
     check_price_movements,
+    check_volume_milestones,
     format_new_market_alert,
     format_price_move_alert,
+    format_volume_milestone_alert,
 )
 
 logger = logging.getLogger(__name__)
@@ -102,6 +104,28 @@ async def run_alert_cycle(app: Application) -> None:
                         message,
                         "big_move",
                         move.get("slug")
+                    )
+
+    # Check for volume milestones (the KEY signal)
+    # Send to users with new_markets_enabled for now
+    if new_market_users:
+        logger.info(f"Checking volume milestones for {len(new_market_users)} users...")
+        milestones = await check_volume_milestones(
+            limit=100,
+            record=True
+        )
+
+        if milestones:
+            logger.info(f"Found {len(milestones)} volume milestones, sending alerts...")
+            for milestone in milestones[:5]:  # Limit to 5 alerts per cycle
+                message = format_volume_milestone_alert(milestone)
+                for user in new_market_users:
+                    await send_alert_to_user(
+                        app,
+                        user["telegram_id"],
+                        message,
+                        "volume_milestone",
+                        milestone.get("slug")
                     )
 
     logger.info("Alert cycle complete")

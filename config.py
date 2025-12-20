@@ -24,6 +24,10 @@ PRICES_HISTORY_ENDPOINT = f"{CLOB_API_BASE}/prices-history"
 BIG_MOVE_THRESHOLD = 10  # Percentage points (e.g., 45% -> 55% = 10% move)
 CHECK_INTERVAL_MINUTES = 5
 
+# Volume milestone thresholds (in dollars)
+# Alert when a market crosses these for the first time
+VOLUME_THRESHOLDS = [10_000, 50_000]  # $10K, $50K
+
 # Database
 DATABASE_PATH = "bot_data.db"
 
