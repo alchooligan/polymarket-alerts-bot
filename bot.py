@@ -254,6 +254,46 @@ Toggle which alerts you want to receive:"""
     await query.edit_message_text(text, reply_markup=keyboard)
 
 
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /debug command - show database stats for diagnostics."""
+    from database import get_connection
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Count snapshots
+        cursor.execute("SELECT COUNT(*) as count FROM volume_snapshots")
+        snapshot_count = cursor.fetchone()["count"]
+
+        # Count baselines
+        cursor.execute("SELECT COUNT(*) as count FROM volume_baselines")
+        baseline_count = cursor.fetchone()["count"]
+
+        # Count milestones
+        cursor.execute("SELECT COUNT(*) as count FROM volume_milestones")
+        milestone_count = cursor.fetchone()["count"]
+
+        # Get most recent snapshot time
+        cursor.execute("SELECT MAX(recorded_at) as latest FROM volume_snapshots")
+        latest = cursor.fetchone()["latest"]
+
+        conn.close()
+
+        response = f"""Database Stats
+
+Volume snapshots: {snapshot_count}
+Volume baselines: {baseline_count}
+Volume milestones: {milestone_count}
+Latest snapshot: {latest or 'None'}
+
+DB path: bot_data.db"""
+
+        await update.message.reply_text(response)
+    except Exception as e:
+        await update.message.reply_text(f"Debug error: {e}")
+
+
 async def checknow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /checknow command - manually trigger an alert cycle."""
     await update.message.reply_text("Running alert check...")
@@ -301,6 +341,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("discover", discover_command))
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("checknow", checknow_command))
+    application.add_handler(CommandHandler("debug", debug_command))
 
     # Add callback handler for inline buttons
     application.add_handler(CallbackQueryHandler(settings_callback))
