@@ -256,7 +256,7 @@ Toggle which alerts you want to receive:"""
 
 async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /debug command - show database stats for diagnostics."""
-    from database import get_connection
+    from database import get_connection, is_volume_seeded
 
     try:
         conn = get_connection()
@@ -278,6 +278,9 @@ async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         cursor.execute("SELECT MAX(recorded_at) as latest FROM volume_snapshots")
         latest = cursor.fetchone()["latest"]
 
+        # Check seeded flag
+        seeded = is_volume_seeded()
+
         conn.close()
 
         response = f"""Database Stats
@@ -286,12 +289,39 @@ Volume snapshots: {snapshot_count}
 Volume baselines: {baseline_count}
 Volume milestones: {milestone_count}
 Latest snapshot: {latest or 'None'}
-
-DB path: bot_data.db"""
+Seeded flag: {seeded}"""
 
         await update.message.reply_text(response)
     except Exception as e:
         await update.message.reply_text(f"Debug error: {e}")
+
+
+async def seed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /seed command - force re-seed volume baselines."""
+    from alerts import seed_volume_baselines
+    from database import set_system_flag
+
+    await update.message.reply_text("Force seeding volume baselines...")
+
+    try:
+        # Clear the seeded flag first so we can reseed
+        set_system_flag("volume_baselines_seeded", None)
+
+        # Run seeding
+        stats = await seed_volume_baselines(target_count=500)
+
+        response = f"""Seeding complete!
+
+Markets scanned: {stats.get('markets_scanned', 0)}
+Baselines recorded: {stats.get('baselines_recorded', 0)}
+Milestones recorded: {stats.get('milestones_recorded', 0)}
+
+Now try /checknow to detect new milestones."""
+
+        await update.message.reply_text(response)
+    except Exception as e:
+        logger.error(f"Seeding error: {e}")
+        await update.message.reply_text(f"Seeding error: {e}")
 
 
 async def checknow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -342,6 +372,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("settings", settings_command))
     application.add_handler(CommandHandler("checknow", checknow_command))
     application.add_handler(CommandHandler("debug", debug_command))
+    application.add_handler(CommandHandler("seed", seed_command))
 
     # Add callback handler for inline buttons
     application.add_handler(CallbackQueryHandler(settings_callback))
