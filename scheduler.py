@@ -63,11 +63,18 @@ async def run_alert_cycle(app: Application) -> dict:
         "alerts_sent": 0,
     }
 
+    # Always collect a wide snapshot for metrics and velocity, even if no users
+    try:
+        events = await get_all_markets_paginated(target_count=MARKETS_TO_SCAN, include_spam=False)
+        stats["markets_scanned"] = len(events)
+        save_volume_snapshots_bulk(events)
+        logger.info(f"Saved {len(events)} volume snapshots")
+    except Exception as e:
+        logger.error(f"Failed to save volume snapshots: {e}")
+        events = []
+
     # Get users with alerts enabled
     users = get_all_users_with_alerts_enabled()
-    if not users:
-        logger.info("No users with alerts enabled, skipping cycle")
-        return stats
 
     # Separate users by alert type
     new_market_users = [u for u in users if u.get("new_markets_enabled")]
@@ -124,60 +131,56 @@ async def run_alert_cycle(app: Application) -> dict:
                     if sent:
                         stats["alerts_sent"] += 1
 
-    # Check for volume milestones (the KEY signal)
-    # Send to users with new_markets_enabled for now
-    if new_market_users:
-        logger.info(f"Checking volume milestones for {len(new_market_users)} users...")
+    # Check for volume milestones (the KEY signal). We still compute crossings
+    # even if no users, so baselines stay fresh for when users return.
+    try:
         milestones = await check_volume_milestones(
             target_count=MARKETS_TO_SCAN,
             record=True
         )
         stats["milestones"] = len(milestones)
-        stats["markets_scanned"] = MARKETS_TO_SCAN  # Approximate
-
-        if milestones:
-            total_found = len(milestones)
-            logger.info(f"Found {total_found} volume milestones")
-
-            # Apply cap
-            alerts_to_send = milestones[:ALERT_CAP_PER_CYCLE]
-            overflow_count = max(0, total_found - ALERT_CAP_PER_CYCLE)
-
-            # Send individual alerts
-            for milestone in alerts_to_send:
-                message = format_volume_milestone_alert(milestone)
-                for user in new_market_users:
-                    sent = await send_alert_to_user(
-                        app,
-                        user["telegram_id"],
-                        message,
-                        "volume_milestone",
-                        milestone.get("slug")
-                    )
-                    if sent:
-                        stats["alerts_sent"] += 1
-
-            # Send digest if we hit the cap
-            if overflow_count > 0:
-                digest_msg = f"📊 +{overflow_count} more volume milestones this cycle.\nUse /top to see top markets."
-                for user in new_market_users:
-                    await send_alert_to_user(
-                        app,
-                        user["telegram_id"],
-                        digest_msg,
-                        "volume_digest",
-                        None
-                    )
-
-    # Save volume snapshots for velocity detection (Phase 1)
-    # Do this regardless of user settings - we need historical data
-    try:
-        events = await get_all_markets_paginated(target_count=MARKETS_TO_SCAN, include_spam=False)
-        save_volume_snapshots_bulk(events)
-        stats["markets_scanned"] = len(events)
-        logger.info(f"Saved {len(events)} volume snapshots")
     except Exception as e:
-        logger.error(f"Failed to save volume snapshots: {e}")
+        logger.error(f"Failed to evaluate volume milestones: {e}")
+        milestones = []
+
+    if new_market_users and milestones:
+        total_found = len(milestones)
+        logger.info(f"Found {total_found} volume milestones")
+
+        # Apply cap
+        alerts_to_send = milestones[:ALERT_CAP_PER_CYCLE]
+        overflow_count = max(0, total_found - ALERT_CAP_PER_CYCLE)
+
+        # Send individual alerts
+        for milestone in alerts_to_send:
+            message = format_volume_milestone_alert(milestone)
+            for user in new_market_users:
+                sent = await send_alert_to_user(
+                    app,
+                    user["telegram_id"],
+                    message,
+                    "volume_milestone",
+                    milestone.get("slug")
+                )
+                if sent:
+                    stats["alerts_sent"] += 1
+
+        # Send digest if we hit the cap
+        if overflow_count > 0:
+            digest_msg = f"📊 +{overflow_count} more volume milestones this cycle.\nUse /top to see top markets."
+            for user in new_market_users:
+                await send_alert_to_user(
+                    app,
+                    user["telegram_id"],
+                    digest_msg,
+                    "volume_digest",
+                    None
+                )
+
+    # If there are no users, we still return collected stats (including
+    # markets_scanned) so manual /checknow shows real work performed.
+    if not users:
+        logger.info("No users with alerts enabled, skipping alert sends")
 
     logger.info("Alert cycle complete")
     return stats

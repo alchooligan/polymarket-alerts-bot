@@ -206,6 +206,14 @@ async def seed_volume_baselines(
         include_spam=False
     )
 
+    if not events:
+        logger.warning("Seeding aborted: no markets fetched (API empty or blocked). Will retry next cycle.")
+        return {
+            "markets_scanned": 0,
+            "baselines_recorded": 0,
+            "milestones_recorded": 0,
+        }
+
     logger.info(f"Fetched {len(events)} unique markets for seeding")
 
     # Prepare bulk inserts
@@ -233,8 +241,11 @@ async def seed_volume_baselines(
     # Bulk insert milestones
     record_milestones_bulk(milestones_to_insert)
 
-    # Mark as seeded
-    mark_volume_seeded()
+    # Mark as seeded only if we actually recorded something
+    if baselines_to_insert:
+        mark_volume_seeded()
+    else:
+        logger.warning("Seeding fetched markets but no baselines recorded; will retry later.")
 
     stats = {
         "markets_scanned": len(events),

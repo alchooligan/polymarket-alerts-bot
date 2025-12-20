@@ -59,10 +59,16 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         # Fetch popular markets (sorted by volume from API)
-        events = await get_popular_markets(limit=100, include_spam=False)
+        events = await asyncio.wait_for(
+            get_popular_markets(limit=100, include_spam=False),
+            timeout=20
+        )
 
         if not events:
-            await update.message.reply_text("No markets found. Try again later.")
+            await update.message.reply_text(
+                "No markets found (API returned nothing).\n"
+                "Try again later or use /discover for rising markets."
+            )
             return
 
         # Show top 5 events by volume
@@ -91,6 +97,9 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         response = "\n".join(response_lines)
         await update.message.reply_text(response, disable_web_page_preview=True)
 
+    except asyncio.TimeoutError:
+        logger.error("Timeout fetching top markets")
+        await update.message.reply_text("Timed out fetching markets. Please try again.")
     except Exception as e:
         logger.error(f"Error fetching markets: {e}")
         await update.message.reply_text("Error fetching markets. Please try again later.")
@@ -111,10 +120,16 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
 
         # Fetch markets
-        events = await get_all_markets_paginated(target_count=500, include_spam=False)
+        events = await asyncio.wait_for(
+            get_all_markets_paginated(target_count=500, include_spam=False),
+            timeout=25
+        )
 
         if not events:
-            await update.message.reply_text("No markets found. Try again later.")
+            await update.message.reply_text(
+                "No markets found (API returned nothing).\n"
+                "Try again later once data is available."
+            )
             return
 
         # Get volume deltas for last hour
@@ -188,6 +203,9 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         response = "\n".join(response_lines)
         await update.message.reply_text(response, disable_web_page_preview=True)
 
+    except asyncio.TimeoutError:
+        logger.error("Timeout in discover while fetching markets")
+        await update.message.reply_text("Timed out fetching markets. Please try again.")
     except Exception as e:
         logger.error(f"Error in discover: {e}")
         await update.message.reply_text(f"Error: {e}")
@@ -259,6 +277,11 @@ async def checknow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text("Running alert check...")
 
     try:
+        # Ensure the requesting user exists so stats aren't short-circuited
+        telegram_user = update.effective_user
+        if telegram_user:
+            get_or_create_user(telegram_user.id, telegram_user.username)
+
         stats = await run_manual_cycle(context.application)
 
         # Build informative response
