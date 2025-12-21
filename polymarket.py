@@ -299,9 +299,24 @@ def extract_market_info(event: dict) -> list[dict]:
     tags = event.get("tags", [])
     tag_labels = [tag.get("label", "") for tag in tags] if tags else []
 
+    # Get creation date - try multiple fields
+    created_at = (
+        event.get("createdAt") or
+        event.get("created") or
+        event.get("startDate") or
+        ""
+    )
+
     for market in event.get("markets", []):
         # Parse prices
         prices = parse_outcome_prices(market.get("outcomePrices", "[]"))
+
+        # Also check market-level creation date
+        market_created = (
+            market.get("createdAt") or
+            market.get("created") or
+            created_at
+        )
 
         market_info = {
             "id": market.get("id", ""),
@@ -314,6 +329,7 @@ def extract_market_info(event: dict) -> list[dict]:
             "volume": float(market.get("volume", 0) or 0),
             "liquidity": float(market.get("liquidity", 0) or 0),
             "end_date": market.get("endDate", ""),
+            "created_at": market_created,  # Add creation date
             "closed": market.get("closed", False),
             "tags": tag_labels,
             "token_id": market.get("clobTokenIds", [""])[0] if market.get("clobTokenIds") else "",
@@ -489,6 +505,7 @@ async def get_all_markets_paginated(
                     "total_volume": market["volume"],
                     "tags": market["tags"],
                     "end_date": market["end_date"],
+                    "created_at": market.get("created_at", ""),  # Pass through creation date
                 }
             else:
                 event_map[slug]["total_volume"] += market["volume"]

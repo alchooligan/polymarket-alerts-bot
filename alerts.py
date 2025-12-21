@@ -34,6 +34,25 @@ from database import (
 logger = logging.getLogger(__name__)
 
 
+def is_resolved_price(yes_price: float) -> bool:
+    """
+    Check if a market is essentially resolved (YES >= 95% or YES <= 5%).
+    These markets have no edge - outcome is already known.
+
+    Args:
+        yes_price: Current YES price (0-100 scale)
+
+    Returns:
+        True if market is essentially resolved
+    """
+    return yes_price >= 95 or yes_price <= 5
+
+
+def filter_resolved(events: list[dict]) -> list[dict]:
+    """Filter out markets that are essentially resolved (95%+ or 5%-)."""
+    return [e for e in events if not is_resolved_price(e.get("yes_price", 50))]
+
+
 def is_sports_market(event: dict) -> bool:
     """
     Check if a market is sports/esports related.
@@ -363,24 +382,57 @@ async def seed_volume_baselines(
     return stats
 
 
+def is_recently_created(created_at_str: str, max_hours: int = 48) -> bool:
+    """
+    Check if a market was created within the last N hours.
+
+    Args:
+        created_at_str: ISO date string from API
+        max_hours: Maximum age in hours to be considered "recent"
+
+    Returns:
+        True if created within max_hours, False otherwise or if date invalid
+    """
+    from datetime import datetime, timezone
+
+    if not created_at_str:
+        return False
+
+    try:
+        # Handle various date formats
+        if "T" in str(created_at_str):
+            created_date = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+        else:
+            return False
+
+        now = datetime.now(timezone.utc)
+        hours_old = (now - created_date).total_seconds() / 3600
+
+        return hours_old <= max_hours
+    except:
+        return False
+
+
 async def check_volume_milestones(
     target_count: int = 500,
     thresholds: list[int] = None,
     record: bool = True,
     min_discovery_volume: int = None,
+    discovery_max_age_hours: int = 48,
 ) -> tuple[list[dict], list[dict]]:
     """
     Check for markets that have ACTUALLY crossed volume thresholds.
     Uses delta logic: previous volume < threshold <= current volume.
 
-    Also returns "discoveries" - markets we're seeing for the first time
-    that already have significant volume (user shouldn't miss these).
+    Also returns "discoveries" - markets CREATED RECENTLY that launched
+    with significant volume (catches new markets that hit the ground running).
 
     Args:
         target_count: How many markets to fetch (uses pagination)
         thresholds: Volume thresholds to check
         record: If True, record milestones and update baselines
         min_discovery_volume: Minimum volume for a first-seen market to be a "discovery"
+        discovery_max_age_hours: Max age to qualify as a "discovery" (default 48h)
 
     Returns:
         Tuple of (milestones_crossed, discoveries)
@@ -403,12 +455,16 @@ async def check_volume_milestones(
         include_spam=False
     )
 
-    # Filter out sports markets (no edge on sports betting)
+    # Filter out sports markets and resolved markets (no edge)
     events = filter_sports(events)
+    events = filter_resolved(events)
 
     # Get all slugs for bulk baseline lookup
     slugs = [e.get("slug") for e in events if e.get("slug")]
     baselines = get_volume_baselines_bulk(slugs)
+
+    # Get velocity data for rich alerts
+    velocity_1h = get_volume_deltas_bulk(slugs, hours=1)
 
     milestones_crossed = []
     discoveries = []
@@ -417,6 +473,7 @@ async def check_volume_milestones(
     for event in events:
         slug = event.get("slug")
         current_volume = event.get("total_volume", 0)
+        created_at = event.get("created_at", "")
 
         if not slug:
             continue
@@ -434,11 +491,16 @@ async def check_volume_milestones(
                     if record:
                         record_milestone(slug, threshold, current_volume)
 
-            # If it has significant volume, it's a DISCOVERY (don't let user miss it)
-            if current_volume >= min_discovery_volume:
+            # DISCOVERY: must be ACTUALLY NEW (created within 48h) + significant volume
+            # This prevents alerting on old markets we just hadn't seen yet
+            if current_volume >= min_discovery_volume and is_recently_created(created_at, discovery_max_age_hours):
                 # Find highest threshold it's already at
                 crossed = [t for t in thresholds if current_volume >= t]
                 highest = max(crossed) if crossed else min_discovery_volume
+
+                # Calculate velocity for rich alert
+                velocity = velocity_1h.get(slug, 0)
+                velocity_pct = (velocity / current_volume * 100) if current_volume > 0 else 0
 
                 discoveries.append({
                     "title": event.get("title"),
@@ -447,6 +509,9 @@ async def check_volume_milestones(
                     "threshold": highest,
                     "yes_price": event.get("yes_price", 0),
                     "tags": event.get("tags", []),
+                    "created_at": created_at,
+                    "velocity": velocity,
+                    "velocity_pct": velocity_pct,
                     "is_discovery": True,
                 })
             continue
@@ -464,6 +529,10 @@ async def check_volume_milestones(
             highest = max(crossed_thresholds)
             also_crossed = [t for t in crossed_thresholds if t != highest]
 
+            # Calculate velocity for rich alert
+            velocity = velocity_1h.get(slug, 0)
+            velocity_pct = (velocity / current_volume * 100) if current_volume > 0 else 0
+
             milestones_crossed.append({
                 "title": event.get("title"),
                 "slug": slug,
@@ -473,6 +542,8 @@ async def check_volume_milestones(
                 "current_volume": current_volume,
                 "yes_price": event.get("yes_price", 0),
                 "tags": event.get("tags", []),
+                "velocity": velocity,
+                "velocity_pct": velocity_pct,
             })
 
         # Update baseline with current volume
@@ -512,6 +583,9 @@ async def check_velocity_alerts(
         target_count=target_count,
         include_spam=False
     )
+
+    # Filter out resolved markets (no edge on 95%+ or 5%- markets)
+    events = filter_resolved(events)
 
     # Get volume deltas for last hour
     slugs = [e.get("slug") for e in events if e.get("slug")]
@@ -597,7 +671,7 @@ def _format_volume(amount: float) -> str:
 
 
 def format_bundled_milestones(milestones: list[dict]) -> str:
-    """Format multiple volume milestones into one bundled message."""
+    """Format multiple volume milestones into one bundled message with rich data."""
     if not milestones:
         return ""
 
@@ -609,12 +683,23 @@ def format_bundled_milestones(milestones: list[dict]) -> str:
         volume = m.get("current_volume", 0)
         yes_price = m.get("yes_price", 0)
         slug = m.get("slug", "")
+        velocity = m.get("velocity", 0)
+        velocity_pct = m.get("velocity_pct", 0)
 
         threshold_str = _format_volume(threshold)
         volume_str = _format_volume(volume)
+        vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+
+        # Emoji for velocity
+        vel_emoji = ""
+        if velocity_pct >= 20:
+            vel_emoji = " 🔥🔥"
+        elif velocity_pct >= 10:
+            vel_emoji = " 🔥"
 
         lines.append(f"- {title}")
-        lines.append(f"  Crossed {threshold_str} | Now {volume_str} | YES: {yes_price:.0f}%")
+        lines.append(f"  Crossed {threshold_str} | Now {volume_str}")
+        lines.append(f"  YES: {yes_price:.0f}% | {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
         lines.append(f"  polymarket.com/event/{slug}")
         lines.append("")
 
@@ -622,22 +707,33 @@ def format_bundled_milestones(milestones: list[dict]) -> str:
 
 
 def format_bundled_discoveries(discoveries: list[dict]) -> str:
-    """Format discovery alerts - markets we're seeing for the first time with big volume."""
+    """Format discovery alerts - NEW markets that launched with big volume."""
     if not discoveries:
         return ""
 
-    lines = ["New Discovery (launched big)", ""]
+    lines = ["New Discovery (created <48h, launched big)", ""]
 
     for d in discoveries:
         title = d.get("title", "Unknown")[:45]
         volume = d.get("current_volume", 0)
         yes_price = d.get("yes_price", 0)
         slug = d.get("slug", "")
+        velocity = d.get("velocity", 0)
+        velocity_pct = d.get("velocity_pct", 0)
 
         volume_str = _format_volume(volume)
+        vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+
+        # Emoji for velocity
+        vel_emoji = ""
+        if velocity_pct >= 20:
+            vel_emoji = " 🔥🔥"
+        elif velocity_pct >= 10:
+            vel_emoji = " 🔥"
 
         lines.append(f"- {title}")
-        lines.append(f"  Already at {volume_str} | YES: {yes_price:.0f}%")
+        lines.append(f"  Volume: {volume_str} | YES: {yes_price:.0f}%")
+        lines.append(f"  Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
         lines.append(f"  polymarket.com/event/{slug}")
         lines.append("")
 
@@ -699,8 +795,9 @@ async def check_underdog_alerts(
         include_spam=False
     )
 
-    # Filter out sports markets
+    # Filter out sports and resolved markets
     events = filter_sports(events)
+    events = filter_resolved(events)
 
     # Get price changes over 24h
     slugs = [e.get("slug") for e in events if e.get("slug")]
@@ -780,8 +877,9 @@ async def check_closing_soon_alerts(
         include_spam=False
     )
 
-    # Filter out sports markets
+    # Filter out sports and resolved markets
     events = filter_sports(events)
+    events = filter_resolved(events)
 
     # Get volume deltas
     slugs = [e.get("slug") for e in events if e.get("slug")]

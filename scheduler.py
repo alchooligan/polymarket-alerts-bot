@@ -271,8 +271,10 @@ def stop_scheduler() -> None:
 async def run_daily_digest(app: Application) -> dict:
     """
     Send a daily digest to all users at 9am.
-    Summarizes: top markets, biggest movers, velocity leaders.
+    Shows: hottest by velocity %, biggest movers, volume surge leaders.
     """
+    from database import get_volume_deltas_bulk, get_price_deltas_bulk
+
     logger.info("Running daily digest...")
 
     stats = {"users_sent": 0}
@@ -284,59 +286,102 @@ async def run_daily_digest(app: Application) -> dict:
         return stats
 
     try:
-        # Fetch top markets
-        events = await get_all_markets_paginated(target_count=100, include_spam=False)
+        # Fetch markets
+        events = await get_all_markets_paginated(target_count=500, include_spam=False)
 
         if not events:
             logger.warning("No events for daily digest")
             return stats
 
-        # Sort by volume for top markets
-        top_by_volume = sorted(events, key=lambda x: x.get("total_volume", 0), reverse=True)[:5]
+        # Filter out sports and resolved markets
+        events = filter_sports(events)
+        # Filter resolved (95%+ or 5%-)
+        events = [e for e in events if 5 < e.get("yes_price", 50) < 95]
 
-        # Get velocity data
         slugs = [e.get("slug") for e in events if e.get("slug")]
-        from database import get_volume_deltas_bulk
-        deltas = get_volume_deltas_bulk(slugs, hours=24)
 
-        # Find top velocity (24h)
-        velocity_leaders = []
-        for e in events:
-            slug = e.get("slug")
-            if slug in deltas and deltas[slug] > 0:
-                velocity_leaders.append({**e, "delta_24h": deltas[slug]})
-        velocity_leaders.sort(key=lambda x: x["delta_24h"], reverse=True)
-        velocity_leaders = velocity_leaders[:5]
+        # Get velocity and price data
+        deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
+        deltas_24h = get_volume_deltas_bulk(slugs, hours=24)
+        price_deltas_24h = get_price_deltas_bulk(slugs, hours=24)
 
-        # Build digest message
         lines = ["Daily Digest", ""]
 
-        # Top by volume
-        lines.append("Top Markets:")
-        for e in top_by_volume:
-            title = e.get("title", "Unknown")[:35]
-            vol = e.get("total_volume", 0)
-            if vol >= 1_000_000:
-                vol_str = f"${vol/1_000_000:.1f}M"
-            else:
-                vol_str = f"${vol/1_000:.0f}K"
-            lines.append(f"• {title} ({vol_str})")
-        lines.append("")
+        # 1. HOTTEST (by velocity %/hr) - the KEY signal
+        hot_markets = []
+        for e in events:
+            slug = e.get("slug")
+            total_volume = e.get("total_volume", 0)
+            velocity = deltas_1h.get(slug, 0)
+            if velocity > 0 and total_volume > 0:
+                velocity_pct = velocity / total_volume * 100
+                hot_markets.append({**e, "velocity": velocity, "velocity_pct": velocity_pct})
+        hot_markets.sort(key=lambda x: x["velocity_pct"], reverse=True)
 
-        # Velocity leaders
-        if velocity_leaders:
-            lines.append("Fastest Growing (24h):")
-            for e in velocity_leaders:
-                title = e.get("title", "Unknown")[:35]
-                delta = e.get("delta_24h", 0)
-                if delta >= 1_000:
-                    delta_str = f"+${delta/1_000:.0f}K"
-                else:
-                    delta_str = f"+${delta:.0f}"
-                lines.append(f"• {title} ({delta_str})")
+        if hot_markets[:5]:
+            lines.append("🔥 HOTTEST (velocity %/hr):")
+            for m in hot_markets[:5]:
+                title = m.get("title", "Unknown")[:35]
+                vel_pct = m["velocity_pct"]
+                velocity = m["velocity"]
+                vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+                emoji = "🔥🔥" if vel_pct >= 20 else ("🔥" if vel_pct >= 10 else "")
+                lines.append(f"• {title}")
+                lines.append(f"  {vel_str} ({vel_pct:.1f}%/hr) {emoji}")
             lines.append("")
 
-        lines.append("Use /discover for more rising markets.")
+        # 2. BIGGEST MOVERS (price change 24h)
+        movers = []
+        for e in events:
+            slug = e.get("slug")
+            price_data = price_deltas_24h.get(slug, {})
+            price_change = price_data.get("delta", 0)
+            if abs(price_change) >= 5:
+                movers.append({**e, "price_change": price_change})
+        movers.sort(key=lambda x: abs(x["price_change"]), reverse=True)
+
+        gainers = [m for m in movers if m["price_change"] > 0][:3]
+        losers = [m for m in movers if m["price_change"] < 0][:3]
+
+        if gainers or losers:
+            lines.append("📊 MOVERS (24h):")
+            if gainers:
+                for m in gainers:
+                    title = m.get("title", "Unknown")[:30]
+                    emoji = "🚀" if m["price_change"] >= 15 else "⬆️"
+                    lines.append(f"• {emoji} {title} (+{m['price_change']:.0f}%)")
+            if losers:
+                for m in losers:
+                    title = m.get("title", "Unknown")[:30]
+                    emoji = "💀" if m["price_change"] <= -15 else "⬇️"
+                    lines.append(f"• {emoji} {title} ({m['price_change']:.0f}%)")
+            lines.append("")
+
+        # 3. VOLUME SURGE (biggest 24h growth %)
+        volume_surge = []
+        for e in events:
+            slug = e.get("slug")
+            total_volume = e.get("total_volume", 0)
+            delta_24h = deltas_24h.get(slug, 0)
+            if delta_24h > 0 and total_volume > 10000:
+                volume_24h_ago = total_volume - delta_24h
+                if volume_24h_ago > 0:
+                    growth_pct = delta_24h / volume_24h_ago * 100
+                    if growth_pct >= 25:  # At least 25% growth
+                        volume_surge.append({**e, "delta_24h": delta_24h, "growth_pct": growth_pct})
+        volume_surge.sort(key=lambda x: x["growth_pct"], reverse=True)
+
+        if volume_surge[:5]:
+            lines.append("💰 VOLUME SURGE (24h):")
+            for m in volume_surge[:5]:
+                title = m.get("title", "Unknown")[:30]
+                delta = m["delta_24h"]
+                growth = m["growth_pct"]
+                delta_str = f"+${delta/1000:.0f}K" if delta >= 1000 else f"+${delta:.0f}"
+                lines.append(f"• {title} ({delta_str}, +{growth:.0f}%)")
+            lines.append("")
+
+        lines.append("Use /hot, /movers, /discover for full lists")
 
         message = "\n".join(lines)
 

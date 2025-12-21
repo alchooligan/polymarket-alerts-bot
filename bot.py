@@ -22,7 +22,7 @@ from database import (
     get_price_deltas_bulk,
 )
 from scheduler import start_scheduler, stop_scheduler, run_manual_cycle, run_daily_digest
-from alerts import check_underdog_alerts, format_bundled_underdogs, filter_sports, filter_by_category, get_available_categories, _format_volume
+from alerts import check_underdog_alerts, format_bundled_underdogs, filter_sports, filter_resolved, filter_by_category, get_available_categories, _format_volume
 
 # Set up logging
 logging.basicConfig(
@@ -179,8 +179,9 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await update.message.reply_text("No markets found. Try again later.")
             return
 
-        # Filter out sports
+        # Filter out sports and resolved markets
         events = filter_sports(events)
+        events = filter_resolved(events)
 
         # Apply category filter if specified
         if category:
@@ -204,12 +205,13 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        # Build list with deltas
+        # Build list with momentum scores
         markets_with_delta = []
         for event in events:
             slug = event["slug"]
             if slug in deltas_1h:
                 delta_1h = deltas_1h[slug]
+                delta_6h = deltas_6h.get(slug, 0)
                 total_volume = event["total_volume"]
 
                 # Filter out giants (>$500K total volume) to force discovery
@@ -218,21 +220,36 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
                 # Only include positive velocity (growing markets)
                 if delta_1h > 0:
-                    # Calculate velocity as % of market
+                    # Calculate velocity as % of market per hour
                     velocity_pct = (delta_1h / total_volume * 100) if total_volume > 0 else 0
+
+                    # Calculate 6h volume growth %
+                    volume_6h_ago = total_volume - delta_6h
+                    volume_growth_pct = (delta_6h / volume_6h_ago * 100) if volume_6h_ago > 0 else 0
+
+                    # Get price change
+                    price_data_6h = price_deltas_6h.get(slug, {})
+                    price_change = abs(price_data_6h.get("delta", 0))
+
+                    # MOMENTUM SCORE: combines velocity %, volume growth %, and price change
+                    # Weight: velocity (40%) + volume growth (30%) + price change (30%)
+                    momentum_score = (velocity_pct * 0.4) + (volume_growth_pct * 0.3) + (price_change * 0.3)
 
                     markets_with_delta.append({
                         **event,
                         "delta_1h": delta_1h,
-                        "delta_6h": deltas_6h.get(slug, 0),
+                        "delta_6h": delta_6h,
                         "delta_24h": deltas_24h.get(slug, 0),
                         "velocity_pct": velocity_pct,
+                        "volume_growth_pct": volume_growth_pct,
+                        "price_change_6h": price_data_6h.get("delta", 0),
+                        "momentum_score": momentum_score,
                         "price_6h": price_deltas_6h.get(slug, {}),
                         "price_24h": price_deltas_24h.get(slug, {}),
                     })
 
-        # Sort by 1h velocity (highest first)
-        markets_with_delta.sort(key=lambda x: x["delta_1h"], reverse=True)
+        # Sort by MOMENTUM SCORE (not raw velocity)
+        markets_with_delta.sort(key=lambda x: x["momentum_score"], reverse=True)
 
         if not markets_with_delta:
             cat_msg = f" in {category}" if category else ""
@@ -373,8 +390,9 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text("No markets found. Try again later.")
             return
 
-        # Filter out sports
+        # Filter out sports and resolved markets
         events = filter_sports(events)
+        events = filter_resolved(events)
 
         # Apply category filter if specified
         if category:
@@ -403,8 +421,8 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 velocity = deltas[slug]
                 total_volume = event.get("total_volume", 0)
 
-                # Calculate velocity as % of market
-                velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
+                # Calculate velocity as % of market per hour
+                velocity_pct_per_hour = (velocity / total_volume * 100 / hours) if total_volume > 0 else 0
 
                 # For multi-hour windows, normalize to per-hour rate
                 velocity_per_hour = velocity / hours if hours > 1 else velocity
@@ -413,12 +431,12 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     **event,
                     "velocity": velocity,
                     "velocity_per_hour": velocity_per_hour,
-                    "velocity_pct": velocity_pct / hours,  # Per hour
+                    "velocity_pct": velocity_pct_per_hour,
                     "price_data": price_deltas.get(slug, {}),
                 })
 
-        # Sort by velocity (highest first)
-        hot_markets.sort(key=lambda x: x["velocity"], reverse=True)
+        # Sort by velocity %/hr (relative to market size) - THIS IS THE KEY SIGNAL
+        hot_markets.sort(key=lambda x: x["velocity_pct"], reverse=True)
 
         if not hot_markets:
             cat_msg = f" in {category}" if category else ""
@@ -503,6 +521,7 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Get current market data for these slugs
         events = await get_all_markets_paginated(target_count=500, include_spam=False)
         events = filter_sports(events)
+        events = filter_resolved(events)
 
         # Build lookup
         event_map = {e.get("slug"): e for e in events}
@@ -585,8 +604,9 @@ async def quiet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await update.message.reply_text("No markets found. Try again later.")
             return
 
-        # Filter out sports
+        # Filter out sports and resolved markets
         events = filter_sports(events)
+        events = filter_resolved(events)
 
         # Apply category filter if specified
         if category:
@@ -704,8 +724,9 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("No markets found. Try again later.")
             return
 
-        # Filter out sports
+        # Filter out sports and resolved markets
         events = filter_sports(events)
+        events = filter_resolved(events)
 
         # Apply category filter if specified
         if category:
@@ -725,26 +746,24 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             slug = event["slug"]
             total_volume = event["total_volume"]
 
-            # Need decent volume ($25K+)
-            if total_volume < 25_000:
-                continue
-
-            # Get price change
+            # Get price change (no volume filter - let the price movement speak)
             price_data = price_deltas_24h.get(slug, {})
             price_change = price_data.get("delta", 0)
             old_price = price_data.get("old", 0)
 
-            # Must have significant move (>=5%)
-            if abs(price_change) < 5:
+            # Must have meaningful move (>=3%) - lowered from 5%
+            if abs(price_change) < 3:
                 continue
 
             velocity = deltas_1h.get(slug, 0)
+            velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
 
             movers.append({
                 **event,
                 "old_price": old_price,
                 "price_change": price_change,
                 "velocity": velocity,
+                "velocity_pct": velocity_pct,
             })
 
         # Sort by absolute price change (biggest swings first)
@@ -753,10 +772,10 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not movers:
             cat_msg = f" in {category}" if category else ""
             await update.message.reply_text(
-                f"No big movers{cat_msg} found right now.\n\n"
+                f"No movers{cat_msg} found right now.\n\n"
                 "Movers require:\n"
-                "- Volume >= $25K\n"
-                "- Price moved >=5% in 24h"
+                "- Price moved >=3% in 24h\n"
+                "- May need 24h of price data to accumulate"
             )
             return
 
@@ -777,12 +796,16 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 old_price = m["old_price"]
                 price_change = m["price_change"]
                 total_volume = m["total_volume"]
+                velocity = m.get("velocity", 0)
+                velocity_pct = m.get("velocity_pct", 0)
                 slug = m["slug"]
 
                 vol_str = _format_volume(total_volume)
+                vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
 
                 lines.append(f"- {title}")
-                lines.append(f"  {old_price:.0f}% -> {yes_price:.0f}% (+{price_change:.0f}%) | {vol_str}")
+                lines.append(f"  {old_price:.0f}% -> {yes_price:.0f}% (+{price_change:.0f}%)")
+                lines.append(f"  {vol_str} | {vel_str} ({velocity_pct:.1f}%/hr)")
                 lines.append(f"  polymarket.com/event/{slug}")
                 lines.append("")
 
@@ -794,12 +817,16 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 old_price = m["old_price"]
                 price_change = m["price_change"]
                 total_volume = m["total_volume"]
+                velocity = m.get("velocity", 0)
+                velocity_pct = m.get("velocity_pct", 0)
                 slug = m["slug"]
 
                 vol_str = _format_volume(total_volume)
+                vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
 
                 lines.append(f"- {title}")
-                lines.append(f"  {old_price:.0f}% -> {yes_price:.0f}% ({price_change:.0f}%) | {vol_str}")
+                lines.append(f"  {old_price:.0f}% -> {yes_price:.0f}% ({price_change:.0f}%)")
+                lines.append(f"  {vol_str} | {vel_str} ({velocity_pct:.1f}%/hr)")
                 lines.append(f"  polymarket.com/event/{slug}")
                 lines.append("")
 
@@ -1005,53 +1032,108 @@ Your settings: {user_info}"""
 
 
 async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /digest command - send digest to THIS user (for testing)."""
-    await update.message.reply_text("Building digest...")
+    """Handle the /digest command - consolidated 6h summary of what's happening."""
+    await update.message.reply_text("Building 6h digest...")
 
     try:
-        # Build digest for the requesting user
-        events = await get_all_markets_paginated(target_count=100, include_spam=False)
+        # Fetch markets
+        events = await get_all_markets_paginated(target_count=500, include_spam=False)
 
         if not events:
             await update.message.reply_text("No market data available.")
             return
 
-        # Top by volume
-        top_by_volume = sorted(events, key=lambda x: x.get("total_volume", 0), reverse=True)[:5]
+        # Filter out sports and resolved
+        events = filter_sports(events)
+        events = filter_resolved(events)
 
-        # Get velocity data
         slugs = [e.get("slug") for e in events if e.get("slug")]
-        deltas = get_volume_deltas_bulk(slugs, hours=24)
 
-        velocity_leaders = []
+        # Get velocity and price data for 6h window
+        deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
+        deltas_6h = get_volume_deltas_bulk(slugs, hours=6)
+        price_deltas_6h = get_price_deltas_bulk(slugs, hours=6)
+
+        lines = ["6-Hour Digest", ""]
+
+        # 1. HOTTEST (by velocity %) - top 5
+        hot_markets = []
         for e in events:
             slug = e.get("slug")
-            if slug in deltas and deltas[slug] > 0:
-                velocity_leaders.append({**e, "delta_24h": deltas[slug]})
-        velocity_leaders.sort(key=lambda x: x["delta_24h"], reverse=True)
-        velocity_leaders = velocity_leaders[:5]
+            total_volume = e.get("total_volume", 0)
+            velocity = deltas_1h.get(slug, 0)
+            if velocity > 0 and total_volume > 0:
+                velocity_pct = velocity / total_volume * 100
+                hot_markets.append({**e, "velocity": velocity, "velocity_pct": velocity_pct})
+        hot_markets.sort(key=lambda x: x["velocity_pct"], reverse=True)
 
-        # Build message
-        lines = ["Daily Digest", ""]
-        lines.append("Top Markets:")
-        for e in top_by_volume:
-            title = e.get("title", "Unknown")[:35]
-            vol = e.get("total_volume", 0)
-            vol_str = f"${vol/1_000_000:.1f}M" if vol >= 1_000_000 else f"${vol/1_000:.0f}K"
-            lines.append(f"• {title} ({vol_str})")
-        lines.append("")
+        if hot_markets[:5]:
+            lines.append("🔥 HOTTEST (velocity %/hr):")
+            for m in hot_markets[:5]:
+                title = m.get("title", "Unknown")[:35]
+                vel_pct = m["velocity_pct"]
+                velocity = m["velocity"]
+                vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+                emoji = "🔥🔥" if vel_pct >= 20 else ("🔥" if vel_pct >= 10 else "")
+                lines.append(f"• {title}")
+                lines.append(f"  {vel_str} ({vel_pct:.1f}%/hr) {emoji}")
+            lines.append("")
 
-        if velocity_leaders:
-            lines.append("Fastest Growing (24h):")
-            for e in velocity_leaders:
-                title = e.get("title", "Unknown")[:35]
-                delta = e.get("delta_24h", 0)
-                delta_str = f"+${delta/1_000:.0f}K" if delta >= 1_000 else f"+${delta:.0f}"
-                lines.append(f"• {title} ({delta_str})")
-        else:
-            lines.append("(Need 24h of data for velocity)")
+        # 2. BIGGEST MOVERS (price change 6h) - top 5 each direction
+        movers = []
+        for e in events:
+            slug = e.get("slug")
+            price_data = price_deltas_6h.get(slug, {})
+            price_change = price_data.get("delta", 0)
+            if abs(price_change) >= 3:
+                movers.append({**e, "price_change": price_change, "old_price": price_data.get("old", 0)})
+        movers.sort(key=lambda x: abs(x["price_change"]), reverse=True)
 
-        await update.message.reply_text("\n".join(lines))
+        gainers = [m for m in movers if m["price_change"] > 0][:3]
+        losers = [m for m in movers if m["price_change"] < 0][:3]
+
+        if gainers or losers:
+            lines.append("📊 MOVERS (6h):")
+            if gainers:
+                for m in gainers:
+                    title = m.get("title", "Unknown")[:30]
+                    emoji = "🚀" if m["price_change"] >= 15 else "⬆️"
+                    lines.append(f"• {emoji} {title} (+{m['price_change']:.0f}%)")
+            if losers:
+                for m in losers:
+                    title = m.get("title", "Unknown")[:30]
+                    emoji = "💀" if m["price_change"] <= -15 else "⬇️"
+                    lines.append(f"• {emoji} {title} ({m['price_change']:.0f}%)")
+            lines.append("")
+
+        # 3. VOLUME SURGE (biggest 6h volume growth %)
+        volume_surge = []
+        for e in events:
+            slug = e.get("slug")
+            total_volume = e.get("total_volume", 0)
+            delta_6h = deltas_6h.get(slug, 0)
+            if delta_6h > 0 and total_volume > 10000:  # Min $10K
+                volume_6h_ago = total_volume - delta_6h
+                if volume_6h_ago > 0:
+                    growth_pct = delta_6h / volume_6h_ago * 100
+                    if growth_pct >= 10:  # At least 10% growth
+                        volume_surge.append({**e, "delta_6h": delta_6h, "growth_pct": growth_pct})
+        volume_surge.sort(key=lambda x: x["growth_pct"], reverse=True)
+
+        if volume_surge[:5]:
+            lines.append("💰 VOLUME SURGE (6h growth %):")
+            for m in volume_surge[:5]:
+                title = m.get("title", "Unknown")[:30]
+                delta = m["delta_6h"]
+                growth = m["growth_pct"]
+                delta_str = f"+${delta/1000:.0f}K" if delta >= 1000 else f"+${delta:.0f}"
+                lines.append(f"• {title}")
+                lines.append(f"  {delta_str} (+{growth:.0f}%)")
+            lines.append("")
+
+        lines.append("Use /hot, /movers, /discover for full lists")
+
+        await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"Error in digest: {e}")
         await update.message.reply_text(f"Error: {e}")
