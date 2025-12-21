@@ -1262,6 +1262,69 @@ Run /checknow to trigger alerts."""
         await update.message.reply_text(f"Seeding error: {e}")
 
 
+async def unseed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle the /unseed command - remove all snapshot data and start fresh.
+    Use this to clean out fake/seed data and rebuild with real data only.
+    """
+    from database import get_connection
+
+    # Check for confirmation argument
+    args = context.args
+    if not args or args[0].lower() != "confirm":
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM volume_snapshots')
+        vol_count = cursor.fetchone()[0]
+        cursor.execute('SELECT COUNT(*) FROM price_snapshots')
+        price_count = cursor.fetchone()[0]
+
+        await update.message.reply_text(
+            f"This will DELETE all snapshot data:\n"
+            f"• {vol_count:,} volume snapshots\n"
+            f"• {price_count:,} price snapshots\n\n"
+            f"Commands like /hot and /movers will show no data until\n"
+            f"the scheduler rebuilds history (1-6 hours).\n\n"
+            f"To confirm, run: /unseed confirm"
+        )
+        return
+
+    await update.message.reply_text("Clearing all snapshot data...")
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Delete all snapshots
+        cursor.execute('DELETE FROM volume_snapshots')
+        vol_deleted = cursor.rowcount
+        cursor.execute('DELETE FROM price_snapshots')
+        price_deleted = cursor.rowcount
+        conn.commit()
+
+        # Run one checknow to start fresh data collection
+        await update.message.reply_text(
+            f"Cleared {vol_deleted:,} volume + {price_deleted:,} price snapshots.\n\n"
+            f"Running /checknow to start fresh data collection..."
+        )
+
+        # Trigger a fresh data collection
+        from scheduler import run_manual_cycle
+        stats = await run_manual_cycle(context.application)
+
+        await update.message.reply_text(
+            f"Fresh start complete!\n\n"
+            f"Collected {stats['markets_scanned']} markets.\n"
+            f"Scheduler will build history every 5 min.\n\n"
+            f"• /hot works after ~1 hour\n"
+            f"• /movers works after ~6 hours\n\n"
+            f"Use /dbstatus to check progress."
+        )
+    except Exception as e:
+        logger.error(f"Unseed error: {e}")
+        await update.message.reply_text(f"Error: {e}")
+
+
 async def checknow_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /checknow command - manually trigger an alert cycle."""
     await update.message.reply_text("Running alert check...")
@@ -1378,6 +1441,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("checknow", checknow_command))
     application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CommandHandler("seed", seed_command))
+    application.add_handler(CommandHandler("unseed", unseed_command))
     application.add_handler(CommandHandler("watch", watch_command))
     application.add_handler(CommandHandler("unwatch", unwatch_command))
     application.add_handler(CommandHandler("watchlist", watchlist_command))
