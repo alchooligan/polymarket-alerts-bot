@@ -670,6 +670,216 @@ def _format_volume(amount: float) -> str:
         return f"${amount:.0f}"
 
 
+def format_market_card(
+    market: dict,
+    style: str = "full",
+    show_emoji: bool = True,
+    context: str = None,
+) -> str:
+    """
+    UNIVERSAL MARKET CARD FORMAT
+    Single source of truth for displaying any market, everywhere.
+
+    Args:
+        market: Dict with market data (title, slug, yes_price, total_volume, etc.)
+        style: "full" (complete card), "compact" (single line), "alert" (for push)
+        show_emoji: Whether to show indicator emojis
+        context: Optional context line (e.g., "Crossed $100K", "Created 5h ago")
+
+    Returns:
+        Formatted market card string
+    """
+    from datetime import datetime, timezone
+
+    # Extract data with defaults
+    title = market.get("title", "Unknown")
+    slug = market.get("slug", "")
+    yes_price = market.get("yes_price", 50)
+    total_volume = market.get("total_volume", 0)
+
+    # Velocity data
+    velocity = market.get("velocity", 0)
+    velocity_pct = market.get("velocity_pct", 0)
+
+    # Volume deltas
+    delta_6h = market.get("delta_6h", 0)
+    volume_growth_pct = market.get("volume_growth_pct", 0)
+
+    # Price deltas
+    price_change_6h = market.get("price_change_6h", 0)
+    price_change_24h = market.get("price_change_24h", 0)
+    old_price = market.get("old_price", 0)
+
+    # End date
+    end_date_str = market.get("end_date") or market.get("endDate", "")
+
+    # === EMOJI LOGIC ===
+    vel_emoji = ""
+    if show_emoji and velocity_pct >= 20:
+        vel_emoji = " 🔥🔥"
+    elif show_emoji and velocity_pct >= 10:
+        vel_emoji = " 🔥"
+
+    vol_emoji = ""
+    if show_emoji and volume_growth_pct >= 50:
+        vol_emoji = " 🔥"
+
+    price_6h_emoji = ""
+    if show_emoji:
+        if price_change_6h >= 15:
+            price_6h_emoji = " 🚀"
+        elif price_change_6h <= -15:
+            price_6h_emoji = " 💀"
+        elif price_change_6h >= 8:
+            price_6h_emoji = " ⬆️"
+        elif price_change_6h <= -8:
+            price_6h_emoji = " ⬇️"
+
+    price_24h_emoji = ""
+    if show_emoji:
+        if price_change_24h >= 15:
+            price_24h_emoji = " 🚀"
+        elif price_change_24h <= -15:
+            price_24h_emoji = " 💀"
+        elif price_change_24h >= 8:
+            price_24h_emoji = " ⬆️"
+        elif price_change_24h <= -8:
+            price_24h_emoji = " ⬇️"
+
+    # === FORMAT HELPERS ===
+    vol_str = _format_volume(total_volume)
+    vel_abs_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+
+    # 6h volume change
+    if delta_6h > 0:
+        delta_6h_str = f"+${delta_6h/1000:.0f}K" if delta_6h >= 1000 else f"+${delta_6h:.0f}"
+        vol_6h_str = f"{delta_6h_str} (+{volume_growth_pct:.0f}%){vol_emoji}"
+    else:
+        vol_6h_str = "—"
+
+    # Price changes
+    if price_change_6h != 0:
+        p6_sign = "+" if price_change_6h > 0 else ""
+        price_6h_str = f"{p6_sign}{price_change_6h:.0f}%{price_6h_emoji}"
+    else:
+        price_6h_str = "flat"
+
+    if price_change_24h != 0:
+        p24_sign = "+" if price_change_24h > 0 else ""
+        price_24h_str = f"{p24_sign}{price_change_24h:.0f}%{price_24h_emoji}"
+    else:
+        price_24h_str = "—"
+
+    # Closes time
+    closes_str = ""
+    if end_date_str:
+        try:
+            if "T" in str(end_date_str):
+                end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+                now = datetime.now(timezone.utc)
+                hours_left = (end_date - now).total_seconds() / 3600
+                if hours_left > 0:
+                    if hours_left < 1:
+                        closes_str = f"{hours_left*60:.0f}m left"
+                        if show_emoji:
+                            closes_str += " ⏰"
+                    elif hours_left < 24:
+                        closes_str = f"{hours_left:.0f}h left"
+                        if show_emoji:
+                            closes_str += " ⏳"
+                    else:
+                        closes_str = f"{hours_left/24:.0f} days"
+        except:
+            pass
+
+    # === COMPACT FORMAT (for lists) ===
+    if style == "compact":
+        # Single line: title — price | velocity | 6h change
+        title_short = title[:40] + "..." if len(title) > 40 else title
+        return f"{title_short} — {yes_price:.0f}% | {vel_abs_str} ({velocity_pct:.1f}%/hr){vel_emoji} | 6h: {price_6h_str}"
+
+    # === FULL FORMAT ===
+    lines = []
+
+    # Title (truncate to 50 chars)
+    title_display = title[:50] + "..." if len(title) > 50 else title
+    lines.append(title_display)
+    lines.append("")
+
+    # Context line if provided (e.g., "Crossed $100K", "Created 5h ago")
+    if context:
+        lines.append(context)
+
+    # Odds line
+    lines.append(f"Odds: YES at {yes_price:.0f}%")
+
+    # Velocity line
+    lines.append(f"Velocity: {vel_abs_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
+
+    # Volume line
+    lines.append(f"Volume: {vol_str} | 6h: {vol_6h_str}")
+
+    # Price line
+    lines.append(f"Price: {yes_price:.0f}% | 6h: {price_6h_str} | 24h: {price_24h_str}")
+
+    # Closes line (if available)
+    if closes_str:
+        lines.append(f"Closes: {closes_str}")
+
+    # Link
+    lines.append("")
+    lines.append(f"polymarket.com/event/{slug}")
+
+    return "\n".join(lines)
+
+
+def format_market_list(
+    markets: list[dict],
+    header: str,
+    explanation: str = None,
+    max_full: int = 5,
+    max_compact: int = 10,
+    show_emoji: bool = True,
+) -> str:
+    """
+    Format a list of markets with header and optional explanation.
+    Shows first N as full cards, rest as compact lines.
+
+    Args:
+        markets: List of market dicts
+        header: Title for the list (e.g., "🔥 Hottest Markets (1h)")
+        explanation: Brief explanation of what this shows
+        max_full: How many to show in full format
+        max_compact: How many additional to show in compact format
+        show_emoji: Whether to show indicator emojis
+    """
+    if not markets:
+        return ""
+
+    lines = [header]
+
+    if explanation:
+        lines.append(explanation)
+
+    lines.append("")
+
+    # Full cards for top N
+    for i, m in enumerate(markets[:max_full], 1):
+        lines.append(f"{i}.")
+        lines.append(format_market_card(m, style="full", show_emoji=show_emoji))
+        lines.append("")
+
+    # Compact lines for rest
+    if len(markets) > max_full:
+        remaining = markets[max_full:max_full + max_compact]
+        if remaining:
+            lines.append("More:")
+            for i, m in enumerate(remaining, max_full + 1):
+                lines.append(f"{i}. {format_market_card(m, style='compact', show_emoji=show_emoji)}")
+
+    return "\n".join(lines).strip()
+
+
 def format_bundled_milestones(milestones: list[dict]) -> str:
     """Format multiple volume milestones into one bundled message with rich data."""
     if not milestones:

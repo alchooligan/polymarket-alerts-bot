@@ -22,7 +22,16 @@ from database import (
     get_price_deltas_bulk,
 )
 from scheduler import start_scheduler, stop_scheduler, run_manual_cycle, run_daily_digest
-from alerts import check_underdog_alerts, format_bundled_underdogs, filter_sports, filter_resolved, filter_by_category, get_available_categories, _format_volume
+from alerts import (
+    check_underdog_alerts,
+    format_bundled_underdogs,
+    filter_sports,
+    filter_resolved,
+    filter_by_category,
+    get_available_categories,
+    _format_volume,
+    format_market_card,
+)
 
 # Set up logging
 logging.basicConfig(
@@ -38,106 +47,131 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user = update.effective_user
     get_or_create_user(user.id, user.username)
 
-    welcome_message = """Welcome to Polymarket Alerts Bot!
+    welcome_message = """👋 Welcome to PolySniffer
 
-I'll help you track prediction markets on Polymarket.
-Sports markets are filtered out (no edge there).
+I find Polymarket opportunities before they're obvious.
 
-On-demand commands:
-/hot - Fastest moving (velocity)
-/discover - Rising markets
-/movers - Biggest price swings
-/quiet - Sleeping giants
-/underdogs - Contrarian plays
-/new - Recently added markets
+QUICK START:
+/discover — Markets heating up right now (start here)
+/hot — Where money is flowing
+/movers — Biggest price swings
 
-Category filters (add to any command):
-crypto, politics, tech, econ, world
-Example: /hot crypto or /movers politics
+AUTO-ALERTS (you'll receive these):
+• New markets launching with traction
+• Volume milestones ($100K, $500K, $1M)
+• Markets about to close with action
 
-Watchlist:
-/watch <slug> - Track a market
-/watchlist - Your tracked markets
+Type /how for the full guide.
+Type /settings to customize alerts.
 
-Settings:
-/settings - Toggle push alerts
-/checknow - Manual scan
-/how - Detailed explanation
-
-Push alerts (every 5 min):
-• Volume milestones ($100K+)
-• Discoveries (new + $25K+)
-• Closing soon (<12h)
-• Watchlist moves (5%+)"""
+Sports markets are excluded — no edge there."""
 
     await update.message.reply_text(welcome_message)
 
 
 async def how_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle the /how command - simple explanation of commands and alerts.
-    Consumer-friendly, not technical.
-    """
-    msg = """HOW IT WORKS
+    """Handle the /how command - comprehensive guide."""
+    msg = """📖 HOW POLYSNIFFER WORKS
+
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-AUTOMATIC ALERTS (every 5 min):
+🎯 CORE COMMANDS (use these daily)
+
+/discover [category]
+Your main tool. Shows small markets waking up.
+Sorted by momentum: velocity + volume growth + price change.
+→ Try: /discover crypto
+
+/hot [time] [category]
+Where money is flowing RIGHT NOW.
+Sorted by velocity %/hr — highlights fast movers, not just big markets.
+→ Try: /hot 1h, /hot 6h crypto, /hot 24h politics
+
+/movers [category]
+Biggest price swings in last 24h.
+Opinion changed = something happened.
+→ Try: /movers, /movers politics
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+📋 UTILITY COMMANDS
+
+/digest
+Consolidated summary — less spam, same signal.
+
+/new [time]
+Recently created markets.
+→ Try: /new, /new 48h
+
+/quiet [category]
+Big markets with low activity. Sleeping giants.
+→ Try: /quiet politics
+
+/underdogs
+Long shots (YES <20%) with rising prices.
+Contrarian money moving.
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔔 AUTOMATIC ALERTS
 
 Volume Milestones
-→ Alert when market crosses $100K, $250K, $500K, or $1M
-→ You only get each milestone once per market
+→ Market crosses $100K, $250K, $500K, or $1M
+→ You get each milestone once per market
 
-Discoveries
-→ Alert when we find a NEW market that already has $25K+
-→ Catches markets that "launched big"
+New Discoveries
+→ Market created in last 48h with $25K+ already
+→ Catches "launched big" moments
 
 Closing Soon
-→ Alert when market ends in <12 hours AND has $5K+/hr action
-→ Last-minute betting often = someone knows something
+→ Market ends in <12h with $5K+/hr action
+→ Last-minute money often = someone knows something
 
 Watchlist
-→ Alert when YOUR tracked markets move 5%+
+→ Your tracked markets move 5%+
 → Add with: /watch <slug>
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-ON-DEMAND COMMANDS:
+🏷️ CATEGORY FILTERS
 
-/hot [time] [category]
-→ Markets by velocity (money flowing in)
-→ Try: /hot 6h, /hot 24h, /hot crypto
-
-/discover [category]
-→ Rising markets (<$500K) with momentum
-→ Shows velocity, volume changes, price history
-
-/movers [category]
-→ Biggest price swings in 24h (±5%+)
-→ Split into GAINERS and LOSERS
-
-/quiet [category]
-→ Sleeping giants: big ($100K+) but quiet
-→ Could wake up anytime
-
-/underdogs
-→ YES <20% but price rising (+2% in 24h)
-→ Contrarian money moving the needle
-
-/new [time]
-→ Recently added markets
-→ Try: /new 48h
-
-━━━━━━━━━━━━━━━━━━━━━━━━
-
-CATEGORY FILTERS:
+Add to any command:
 crypto, politics, tech, econ, world, entertainment
 
-Example: /hot politics or /movers crypto
+Examples: /discover crypto, /hot politics
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-NOTE: Sports/esports markets excluded.
-No edge on sports betting."""
+📊 READING THE DATA
+
+Velocity %/hr = money flow relative to market size
+→ 8%/hr on $100K market = heating fast
+→ 0.1%/hr on $50M market = normal flow
+
+Emojis:
+🔥 = velocity >10%/hr (heating up)
+🔥🔥 = velocity >20%/hr (on fire)
+🚀 = price up >15%
+💀 = price down >15%
+⬆️⬇️ = smaller price moves
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚙️ SETTINGS
+
+/settings — Toggle alert types
+/watch <slug> — Add to watchlist
+/watchlist — See tracked markets
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 TIP
+
+Start with /discover daily.
+Check /hot when news breaks.
+Use /digest for less noise.
+
+Sports and resolved markets (95%+, 5%-) are filtered out."""
 
     await update.message.reply_text(msg)
 
@@ -259,62 +293,31 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        # Format response with rich data
-        header = "Waking Up (velocity + data)"
-        if category:
-            header += f" [{category}]"
-        response_lines = [header, ""]
+        # Enrich markets with velocity data for format_market_card
+        for m in markets_with_delta:
+            m["velocity"] = m.get("delta_1h", 0)
+            price_24h = m.get("price_24h", {})
+            m["price_change_24h"] = price_24h.get("delta", 0)
 
-        for event in markets_with_delta[:10]:
-            title = event["title"][:45]
-            yes_price = event["yes_price"]
-            delta_1h = event["delta_1h"]
-            delta_6h = event["delta_6h"]
-            total = event["total_volume"]
-            velocity_pct = event["velocity_pct"]
-            slug = event["slug"]
-            price_6h = event.get("price_6h", {})
-            price_24h = event.get("price_24h", {})
+        # Format header with explanation
+        cat_label = f" [{category}]" if category else ""
+        header = f"""🔍 Discover{cat_label}
 
-            # Format velocity
-            vel_str = f"+${delta_1h/1000:.1f}K/hr" if delta_1h >= 1000 else f"+${delta_1h:.0f}/hr"
+Small markets waking up, sorted by momentum score.
+Momentum = velocity % + volume growth % + price change.
+"""
 
-            # Format total volume
-            vol_str = _format_volume(total)
+        # Format using market cards
+        lines = [header]
+        for i, m in enumerate(markets_with_delta[:8], 1):
+            lines.append(f"━━━ {i} ━━━")
+            lines.append(format_market_card(m, style="full"))
+            lines.append("")
 
-            # Format 6h volume change
-            if delta_6h > 0:
-                delta_6h_pct = (delta_6h / (total - delta_6h) * 100) if (total - delta_6h) > 0 else 0
-                vol_6h_str = f"+${delta_6h/1000:.0f}K" if delta_6h >= 1000 else f"+${delta_6h:.0f}"
-                vol_change_str = f"{vol_6h_str} in 6h (+{delta_6h_pct:.0f}%)"
-            else:
-                vol_change_str = "no 6h data"
+        if len(markets_with_delta) > 8:
+            lines.append(f"+{len(markets_with_delta) - 8} more. Use /hot for velocity focus.")
 
-            # Format price changes
-            price_parts = []
-            if price_6h:
-                p6_delta = price_6h.get("delta", 0)
-                p6_old = price_6h.get("old", 0)
-                if p6_delta != 0:
-                    p6_sign = "+" if p6_delta > 0 else ""
-                    price_parts.append(f"was {p6_old:.0f}% 6h ago ({p6_sign}{p6_delta:.0f}%)")
-            if price_24h:
-                p24_delta = price_24h.get("delta", 0)
-                p24_old = price_24h.get("old", 0)
-                if p24_delta != 0:
-                    p24_sign = "+" if p24_delta > 0 else ""
-                    price_parts.append(f"was {p24_old:.0f}% 24h ago ({p24_sign}{p24_delta:.0f}%)")
-
-            price_str = " | ".join(price_parts) if price_parts else "no price history"
-
-            response_lines.append(f"- {title}")
-            response_lines.append(f"  Velocity: {vel_str} ({velocity_pct:.1f}%/hr of market)")
-            response_lines.append(f"  Volume: {vol_str} total | {vol_change_str}")
-            response_lines.append(f"  Price: {yes_price:.0f}% now | {price_str}")
-            response_lines.append(f"  polymarket.com/event/{slug}")
-            response_lines.append("")
-
-        response = "\n".join(response_lines).strip()
+        response = "\n".join(lines).strip()
         await update.message.reply_text(response, disable_web_page_preview=True)
 
     except Exception as e:
@@ -344,8 +347,31 @@ async def underdogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             return
 
-        # Format and send
-        message = format_bundled_underdogs(underdogs)
+        # Enrich with data for format_market_card
+        for m in underdogs:
+            m["velocity"] = m.get("velocity", 0)
+            m["price_change_24h"] = m.get("price_change", 0)
+            m["velocity_pct"] = (m["velocity"] / m.get("total_volume", 1) * 100) if m.get("total_volume", 0) > 0 else 0
+
+        header = """🎯 Underdogs
+
+Long shots (YES <20%) with rising prices.
+Contrarian money moving the needle.
+"""
+        lines = [header]
+
+        for i, m in enumerate(underdogs[:8], 1):
+            price_change = m.get("price_change", 0)
+            old_price = m.get("old_price", 0)
+            context = f"⬆️ Price: {old_price:.0f}% → {m['yes_price']:.0f}% (+{price_change:.0f}% in 24h)"
+            lines.append(f"━━━ {i} ━━━")
+            lines.append(format_market_card(m, style="full", context=context))
+            lines.append("")
+
+        if len(underdogs) > 8:
+            lines.append(f"+{len(underdogs) - 8} more underdogs rising.")
+
+        message = "\n".join(lines).strip()
         await update.message.reply_text(message, disable_web_page_preview=True)
 
     except Exception as e:
@@ -446,41 +472,30 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
 
-        # Format top 15 with rich data
-        header = f"Hottest Markets ({time_label})"
-        if category:
-            header += f" [{category}]"
-        lines = [header, ""]
-
-        for i, m in enumerate(hot_markets[:15], 1):
-            title = m.get("title", "Unknown")[:40]
-            velocity = m["velocity"]
-            velocity_per_hour = m["velocity_per_hour"]
-            velocity_pct = m["velocity_pct"]
-            total_volume = m.get("total_volume", 0)
-            yes_price = m.get("yes_price", 0)
-            slug = m.get("slug", "")
+        # Enrich with velocity data for format_market_card
+        for m in hot_markets:
+            m["velocity"] = m.get("velocity_per_hour", 0)
             price_data = m.get("price_data", {})
+            m["price_change_6h"] = price_data.get("delta", 0) if hours <= 6 else 0
+            m["price_change_24h"] = price_data.get("delta", 0) if hours > 6 else 0
 
-            # Format velocity
-            vel_str = f"+${velocity/1000:.0f}K" if velocity >= 1000 else f"+${velocity:.0f}"
-            rate_str = f"${velocity_per_hour/1000:.1f}K/hr" if velocity_per_hour >= 1000 else f"${velocity_per_hour:.0f}/hr"
+        # Format header with explanation
+        cat_label = f" [{category}]" if category else ""
+        header = f"""🔥 Hot Markets ({time_label}){cat_label}
 
-            vol_str = _format_volume(total_volume)
+Where money is flowing NOW.
+Sorted by velocity %/hr — fast movers, not just big markets.
+"""
 
-            # Format price change
-            price_change = price_data.get("delta", 0)
-            if price_change != 0:
-                price_sign = "+" if price_change > 0 else ""
-                price_str = f"{price_sign}{price_change:.0f}%"
-            else:
-                price_str = "flat"
-
-            lines.append(f"{i}. {title}")
-            lines.append(f"   Velocity: {vel_str} in {time_label} ({rate_str}, {velocity_pct:.1f}%/hr)")
-            lines.append(f"   Volume: {vol_str} | Price: {yes_price:.0f}% ({price_str})")
-            lines.append(f"   polymarket.com/event/{slug}")
+        # Format using market cards
+        lines = [header]
+        for i, m in enumerate(hot_markets[:10], 1):
+            lines.append(f"━━━ {i} ━━━")
+            lines.append(format_market_card(m, style="full"))
             lines.append("")
+
+        if len(hot_markets) > 10:
+            lines.append(f"+{len(hot_markets) - 10} more with positive velocity.")
 
         message = "\n".join(lines).strip()
         await update.message.reply_text(message, disable_web_page_preview=True)
@@ -549,11 +564,16 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Sort by volume (highest first)
         new_markets.sort(key=lambda x: x["total_volume"], reverse=True)
 
-        # Format top 20
-        lines = [f"New Markets (last {time_label})", ""]
+        # Format with explanation
+        header = f"""🆕 New Markets (last {time_label})
 
-        for i, m in enumerate(new_markets[:20], 1):
-            title = m.get("title", "Unknown")[:40]
+Recently created markets, sorted by volume.
+Use /discover for markets with momentum.
+"""
+        lines = [header]
+
+        for i, m in enumerate(new_markets[:15], 1):
+            title = m.get("title", "Unknown")[:45]
             total_volume = m.get("total_volume", 0)
             yes_price = m.get("yes_price", 0)
             slug = m.get("slug", "")
@@ -561,12 +581,12 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             vol_str = _format_volume(total_volume)
 
             lines.append(f"{i}. {title}")
-            lines.append(f"   Volume: {vol_str} | YES: {yes_price:.0f}%")
+            lines.append(f"   Odds: YES at {yes_price:.0f}% | Volume: {vol_str}")
             lines.append(f"   polymarket.com/event/{slug}")
             lines.append("")
 
-        if len(new_markets) > 20:
-            lines.append(f"+{len(new_markets) - 20} more new markets")
+        if len(new_markets) > 15:
+            lines.append(f"+{len(new_markets) - 15} more new markets")
 
         message = "\n".join(lines).strip()
         await update.message.reply_text(message, disable_web_page_preview=True)
@@ -665,28 +685,27 @@ async def quiet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-        # Format response
-        header = "Sleeping Giants (big + quiet)"
-        if category:
-            header += f" [{category}]"
-        lines = [header, ""]
+        # Enrich with data for format_market_card
+        for m in sleeping_giants:
+            m["velocity"] = m.get("velocity", 0)
+            m["price_change_24h"] = m.get("price_change_24h", 0)
 
-        for i, m in enumerate(sleeping_giants[:15], 1):
-            title = m["title"][:40]
-            yes_price = m["yes_price"]
-            total_volume = m["total_volume"]
-            velocity_pct = m["velocity_pct"]
-            price_change = m["price_change_24h"]
-            slug = m["slug"]
+        cat_label = f" [{category}]" if category else ""
+        header = f"""💤 Sleeping Giants{cat_label}
 
-            vol_str = _format_volume(total_volume)
-            price_sign = "+" if price_change > 0 else ""
+Big markets ($100K+) with low activity.
+Could wake up anytime with the right catalyst.
+"""
+        lines = [header]
 
-            lines.append(f"{i}. {title}")
-            lines.append(f"   Volume: {vol_str} | YES: {yes_price:.0f}%")
-            lines.append(f"   Activity: {velocity_pct:.1f}%/hr | Price: {price_sign}{price_change:.0f}% (24h)")
-            lines.append(f"   polymarket.com/event/{slug}")
+        for i, m in enumerate(sleeping_giants[:8], 1):
+            context = f"💤 Activity: {m['velocity_pct']:.2f}%/hr — sleeping"
+            lines.append(f"━━━ {i} ━━━")
+            lines.append(format_market_card(m, style="full", context=context))
             lines.append("")
+
+        if len(sleeping_giants) > 8:
+            lines.append(f"+{len(sleeping_giants) - 8} more sleeping giants.")
 
         message = "\n".join(lines).strip()
         await update.message.reply_text(message, disable_web_page_preview=True)
@@ -779,55 +798,39 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
 
-        # Split into gainers and losers
-        gainers = [m for m in movers if m["price_change"] > 0][:10]
-        losers = [m for m in movers if m["price_change"] < 0][:10]
+        # Enrich with data for format_market_card
+        for m in movers:
+            m["velocity"] = m.get("velocity", 0)
+            m["price_change_24h"] = m.get("price_change", 0)
 
-        header = "Biggest Movers (24h)"
-        if category:
-            header += f" [{category}]"
-        lines = [header, ""]
+        # Split into gainers and losers
+        gainers = [m for m in movers if m["price_change"] > 0][:5]
+        losers = [m for m in movers if m["price_change"] < 0][:5]
+
+        cat_label = f" [{category}]" if category else ""
+        header = f"""📊 Biggest Movers (24h){cat_label}
+
+Prices changed = opinions shifted.
+Something happened in these markets.
+"""
+        lines = [header]
 
         if gainers:
-            lines.append("GAINERS:")
-            for m in gainers:
-                title = m["title"][:35]
-                yes_price = m["yes_price"]
-                old_price = m["old_price"]
-                price_change = m["price_change"]
-                total_volume = m["total_volume"]
-                velocity = m.get("velocity", 0)
-                velocity_pct = m.get("velocity_pct", 0)
-                slug = m["slug"]
-
-                vol_str = _format_volume(total_volume)
-                vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
-
-                lines.append(f"- {title}")
-                lines.append(f"  {old_price:.0f}% -> {yes_price:.0f}% (+{price_change:.0f}%)")
-                lines.append(f"  {vol_str} | {vel_str} ({velocity_pct:.1f}%/hr)")
-                lines.append(f"  polymarket.com/event/{slug}")
+            lines.append("⬆️ GAINERS:")
+            lines.append("")
+            for i, m in enumerate(gainers, 1):
+                emoji = "🚀" if m["price_change"] >= 15 else "⬆️"
+                context = f"{emoji} Price: {m['old_price']:.0f}% → {m['yes_price']:.0f}% (+{m['price_change']:.0f}%)"
+                lines.append(format_market_card(m, style="full", context=context))
                 lines.append("")
 
         if losers:
-            lines.append("LOSERS:")
-            for m in losers:
-                title = m["title"][:35]
-                yes_price = m["yes_price"]
-                old_price = m["old_price"]
-                price_change = m["price_change"]
-                total_volume = m["total_volume"]
-                velocity = m.get("velocity", 0)
-                velocity_pct = m.get("velocity_pct", 0)
-                slug = m["slug"]
-
-                vol_str = _format_volume(total_volume)
-                vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
-
-                lines.append(f"- {title}")
-                lines.append(f"  {old_price:.0f}% -> {yes_price:.0f}% ({price_change:.0f}%)")
-                lines.append(f"  {vol_str} | {vel_str} ({velocity_pct:.1f}%/hr)")
-                lines.append(f"  polymarket.com/event/{slug}")
+            lines.append("⬇️ LOSERS:")
+            lines.append("")
+            for i, m in enumerate(losers, 1):
+                emoji = "💀" if m["price_change"] <= -15 else "⬇️"
+                context = f"{emoji} Price: {m['old_price']:.0f}% → {m['yes_price']:.0f}% ({m['price_change']:.0f}%)"
+                lines.append(format_market_card(m, style="full", context=context))
                 lines.append("")
 
         message = "\n".join(lines).strip()
