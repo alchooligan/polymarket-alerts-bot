@@ -1146,10 +1146,25 @@ async def seed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     """
     Handle the /seed command - create historical snapshots for immediate testing.
     This creates fake historical data so /hot, /movers, etc. work right after deploy.
+    ONLY works on empty/new databases to prevent corrupting real data.
     """
     from alerts import seed_volume_baselines
     from database import set_system_flag, get_connection
     from datetime import datetime, timezone, timedelta
+
+    # Safety check - don't seed if we already have real data
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM volume_snapshots')
+    vol_count = cursor.fetchone()[0]
+
+    if vol_count > 1000:
+        await update.message.reply_text(
+            f"Database already has {vol_count:,} real snapshots.\n"
+            "Seeding would corrupt real data - aborting.\n\n"
+            "Use /dbstatus to check database state."
+        )
+        return
 
     await update.message.reply_text("Seeding database with historical snapshots...")
 
