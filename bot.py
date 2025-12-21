@@ -51,20 +51,39 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 I find Polymarket opportunities before they're obvious.
 
-QUICK START:
-/discover — Markets heating up right now (start here)
-/hot — Where money is flowing
-/movers — Biggest price swings
+━━━ QUICK START ━━━
 
-AUTO-ALERTS (you'll receive these):
-• New markets launching with traction
-• Volume milestones ($100K, $500K, $1M)
-• Markets about to close with action
+/discover — Small markets waking up (best for early entries)
+/hot — Fastest velocity % (small markets moving fast)
+/top — Most $ flowing in (where whales are betting)
+/movers — Biggest price swings (sentiment shifts)
+/underdogs — Low odds getting money (contrarian bets)
 
-Type /how for the full guide.
-Type /settings to customize alerts.
+All commands support time filters:
+→ /hot 1h, /top 6h, /movers 24h
 
-Sports markets are excluded — no edge there."""
+Filter by category:
+→ /discover crypto, /hot politics, /top tech
+
+━━━ AUTO-ALERTS ━━━
+
+You'll receive alerts for:
+• Markets crossing $100K, $500K, $1M volume
+• New markets launching with traction ($25K+)
+• Markets closing soon with active betting
+• Watchlist price moves (5%+)
+
+Use /settings to toggle, /watch to track markets.
+
+━━━ COMING SOON ━━━
+
+• Smart alerts (multi-signal: volume + price + time)
+• Price targets ("alert me when X hits 60%")
+• Why is this moving? (news context)
+• Portfolio tracking
+
+Sports excluded — no edge there.
+Type /how for the full guide."""
 
     await update.message.reply_text(welcome_message)
 
