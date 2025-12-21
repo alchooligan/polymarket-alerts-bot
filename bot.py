@@ -505,6 +505,116 @@ Sorted by velocity %/hr — fast movers, not just big markets.
         await update.message.reply_text(f"Error: {e}")
 
 
+async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Handle the /top command - show markets by absolute volume added.
+    Usage: /top [1h|6h|24h] [category] - defaults to 1h
+    Unlike /hot (velocity %), this shows raw dollars flowing in.
+    """
+    hours = 1
+    time_label = "1h"
+    category = None
+
+    available_cats = get_available_categories()
+
+    for arg in context.args:
+        arg_lower = arg.lower()
+        if arg_lower in ["6h", "6"]:
+            hours = 6
+            time_label = "6h"
+        elif arg_lower in ["24h", "24"]:
+            hours = 24
+            time_label = "24h"
+        elif arg_lower in available_cats:
+            category = arg_lower
+
+    status_msg = f"Finding top volume gainers ({time_label})"
+    if category:
+        status_msg += f" [{category}]"
+    await update.message.reply_text(status_msg + "...")
+
+    try:
+        events = await get_all_markets_paginated(target_count=2000, include_spam=False)
+
+        if not events:
+            await update.message.reply_text("No markets found. Try again later.")
+            return
+
+        events = filter_sports(events)
+        events = filter_resolved(events)
+
+        if category:
+            events = filter_by_category(events, category)
+
+        slugs = [e.get("slug") for e in events if e.get("slug")]
+        deltas = get_volume_deltas_bulk(slugs, hours=hours)
+        price_deltas = get_price_deltas_bulk(slugs, hours=hours)
+
+        if not deltas:
+            await update.message.reply_text(
+                f"No volume data for {time_label} window yet.\n"
+                "Need more snapshots to accumulate. Try /checknow."
+            )
+            return
+
+        top_markets = []
+        for event in events:
+            slug = event.get("slug")
+            if slug in deltas and deltas[slug] > 0:
+                volume_added = deltas[slug]
+                total_volume = event.get("total_volume", 0)
+                velocity_pct = (volume_added / total_volume * 100 / hours) if total_volume > 0 else 0
+
+                top_markets.append({
+                    **event,
+                    "volume_added": volume_added,
+                    "velocity": volume_added / hours if hours > 1 else volume_added,
+                    "velocity_pct": velocity_pct,
+                    "price_data": price_deltas.get(slug, {}),
+                })
+
+        # Sort by ABSOLUTE volume added (not %)
+        top_markets.sort(key=lambda x: x["volume_added"], reverse=True)
+
+        if not top_markets:
+            cat_msg = f" in {category}" if category else ""
+            await update.message.reply_text(
+                f"No markets{cat_msg} with volume growth in last {time_label}."
+            )
+            return
+
+        # Enrich for format_market_card
+        for m in top_markets:
+            price_data = m.get("price_data", {})
+            m["price_change_6h"] = price_data.get("delta", 0) if hours <= 6 else 0
+            m["price_change_24h"] = price_data.get("delta", 0) if hours > 6 else 0
+
+        cat_label = f" [{category}]" if category else ""
+        header = f"""💰 Top Volume ({time_label}){cat_label}
+
+Most dollars flowing in — big money markets.
+Sorted by absolute $ added, not velocity %.
+"""
+
+        lines = [header]
+        for i, m in enumerate(top_markets[:10], 1):
+            vol_added = m["volume_added"]
+            vol_str = f"+${vol_added/1000:.0f}K" if vol_added >= 1000 else f"+${vol_added:.0f}"
+            lines.append(f"━━━ {i}. {vol_str} ━━━")
+            lines.append(format_market_card(m, style="full"))
+            lines.append("")
+
+        if len(top_markets) > 10:
+            lines.append(f"+{len(top_markets) - 10} more with volume growth.")
+
+        message = "\n".join(lines).strip()
+        await update.message.reply_text(message, disable_web_page_preview=True)
+
+    except Exception as e:
+        logger.error(f"Error in top: {e}")
+        await update.message.reply_text(f"Error: {e}")
+
+
 async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle the /new command - show markets first seen recently.
@@ -1434,6 +1544,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("discover", discover_command))
     application.add_handler(CommandHandler("underdogs", underdogs_command))
     application.add_handler(CommandHandler("hot", hot_command))
+    application.add_handler(CommandHandler("top", top_command))
     application.add_handler(CommandHandler("new", new_command))
     application.add_handler(CommandHandler("quiet", quiet_command))
     application.add_handler(CommandHandler("movers", movers_command))
