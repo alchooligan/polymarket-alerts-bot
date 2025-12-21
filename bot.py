@@ -51,39 +51,32 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 I find Polymarket opportunities before they're obvious.
 
-━━━ QUICK START ━━━
+━━━ COMMANDS ━━━
 
-/discover — Small markets waking up (best for early entries)
-/hot — Fastest velocity % (small markets moving fast)
-/top — Most $ flowing in (where whales are betting)
-/movers — Biggest price swings (sentiment shifts)
-/underdogs — Low odds getting money (contrarian bets)
+/discover — Markets gaining momentum
+/hot — Fastest money flow (% of market)
+/top — Most volume added ($)
+/movers — Biggest price changes
+/underdogs — Low odds with money coming in
 
-All commands support time filters:
-→ /hot 1h, /top 6h, /movers 24h
+Add time: /hot 1h, /top 6h, /movers 24h
+Add category: /discover crypto, /hot politics
 
-Filter by category:
-→ /discover crypto, /hot politics, /top tech
+━━━ ALERTS ━━━
 
-━━━ AUTO-ALERTS ━━━
+I send you automatic alerts when:
+• A market crosses $100K, $500K, or $1M volume
+• A new market launches with real traction ($25K+)
+• A market is closing soon and has active betting
 
-You'll receive alerts for:
-• Markets crossing $100K, $500K, $1M volume
-• New markets launching with traction ($25K+)
-• Markets closing soon with active betting
-• Watchlist price moves (5%+)
+/settings — Turn alerts on/off
+/watch [market] — Track a specific market
 
-Use /settings to toggle, /watch to track markets.
+━━━━━━━━━━━━━━━━━━━━━━━━
 
-━━━ COMING SOON ━━━
+Type /how for the full guide
 
-• Smart alerts (multi-signal: volume + price + time)
-• Price targets ("alert me when X hits 60%")
-• Why is this moving? (news context)
-• Portfolio tracking
-
-Sports excluded — no edge there.
-Type /how for the full guide."""
+Sports markets excluded."""
 
     await update.message.reply_text(welcome_message)
 
