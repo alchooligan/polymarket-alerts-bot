@@ -1143,26 +1143,103 @@ async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def seed_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /seed command - force re-seed volume baselines."""
+    """
+    Handle the /seed command - create historical snapshots for immediate testing.
+    This creates fake historical data so /hot, /movers, etc. work right after deploy.
+    """
     from alerts import seed_volume_baselines
-    from database import set_system_flag
+    from database import set_system_flag, get_connection
+    from datetime import datetime, timezone, timedelta
 
-    await update.message.reply_text("Force seeding volume baselines...")
+    await update.message.reply_text("Seeding database with historical snapshots...")
 
     try:
-        # Clear the seeded flag first so we can reseed
+        # 1. Seed volume baselines (existing behavior)
         set_system_flag("volume_baselines_seeded", None)
-
-        # Run seeding
         stats = await seed_volume_baselines(target_count=500)
+
+        # 2. Fetch current markets
+        events = await get_all_markets_paginated(target_count=500, include_spam=False)
+
+        if not events:
+            await update.message.reply_text("No markets found. Try again later.")
+            return
+
+        # 3. Create historical snapshots at multiple time points
+        conn = get_connection()
+        cursor = conn.cursor()
+        now = datetime.now(timezone.utc)
+
+        # Time points: 1h, 6h, 12h, 24h ago
+        time_points = [
+            (1, 0.98),   # 1h ago, 98% of current volume (simulates small growth)
+            (6, 0.95),   # 6h ago, 95% of current
+            (12, 0.92),  # 12h ago, 92% of current
+            (24, 0.88),  # 24h ago, 88% of current
+        ]
+
+        volume_count = 0
+        price_count = 0
+
+        for event in events:
+            slug = event.get("slug")
+            if not slug:
+                continue
+
+            current_volume = event.get("total_volume", 0)
+            current_price = event.get("yes_price", 50)
+
+            for hours_ago, volume_factor in time_points:
+                ts = (now - timedelta(hours=hours_ago)).strftime('%Y-%m-%d %H:%M:%S')
+
+                # Historical volume (slightly lower than current)
+                old_volume = current_volume * volume_factor
+                cursor.execute(
+                    'INSERT OR REPLACE INTO volume_snapshots (event_slug, volume, recorded_at) VALUES (?, ?, ?)',
+                    (slug, old_volume, ts)
+                )
+                volume_count += 1
+
+                # Historical price (add small random variance)
+                import random
+                price_variance = random.uniform(-5, 5)
+                old_price = max(1, min(99, current_price + price_variance))
+                cursor.execute(
+                    'INSERT OR REPLACE INTO price_snapshots (event_slug, yes_price, recorded_at) VALUES (?, ?, ?)',
+                    (slug, old_price, ts)
+                )
+                price_count += 1
+
+        # Also save current snapshots
+        for event in events:
+            slug = event.get("slug")
+            if not slug:
+                continue
+            ts_now = now.strftime('%Y-%m-%d %H:%M:%S')
+            cursor.execute(
+                'INSERT OR REPLACE INTO volume_snapshots (event_slug, volume, recorded_at) VALUES (?, ?, ?)',
+                (slug, event.get("total_volume", 0), ts_now)
+            )
+            cursor.execute(
+                'INSERT OR REPLACE INTO price_snapshots (event_slug, yes_price, recorded_at) VALUES (?, ?, ?)',
+                (slug, event.get("yes_price", 50), ts_now)
+            )
+
+        conn.commit()
 
         response = f"""Seeding complete!
 
-Markets scanned: {stats.get('markets_scanned', 0)}
-Baselines recorded: {stats.get('baselines_recorded', 0)}
-Milestones recorded: {stats.get('milestones_recorded', 0)}
+Markets: {len(events)}
+Volume snapshots: {volume_count + len(events)}
+Price snapshots: {price_count + len(events)}
+Baselines: {stats.get('baselines_recorded', 0)}
 
-Now try /checknow to detect new milestones."""
+All commands now work immediately:
+• /hot - velocity data ready
+• /movers - price history ready
+• /discover - momentum data ready
+
+Run /checknow to trigger alerts."""
 
         await update.message.reply_text(response)
     except Exception as e:
@@ -1194,6 +1271,66 @@ Use /hot for velocity, /underdogs for contrarian plays"""
     except Exception as e:
         logger.error(f"Error in manual alert check: {e}")
         await update.message.reply_text(f"Error running alert check: {e}")
+
+
+async def dbstatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /dbstatus command - show database statistics."""
+    from database import get_connection, get_volume_snapshot_count
+    from config import DATABASE_PATH
+
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+
+        # Count snapshots
+        cursor.execute('SELECT COUNT(*) FROM volume_snapshots')
+        vol_count = cursor.fetchone()[0]
+
+        cursor.execute('SELECT COUNT(*) FROM price_snapshots')
+        price_count = cursor.fetchone()[0]
+
+        # Get oldest/newest snapshots
+        cursor.execute('SELECT MIN(recorded_at), MAX(recorded_at) FROM volume_snapshots')
+        vol_range = cursor.fetchone()
+
+        cursor.execute('SELECT MIN(recorded_at), MAX(recorded_at) FROM price_snapshots')
+        price_range = cursor.fetchone()
+
+        # Count other tables
+        cursor.execute('SELECT COUNT(*) FROM users')
+        user_count = cursor.fetchone()[0]
+
+        cursor.execute('SELECT COUNT(*) FROM volume_milestones')
+        milestone_count = cursor.fetchone()[0]
+
+        cursor.execute('SELECT COUNT(*) FROM watchlist')
+        watch_count = cursor.fetchone()[0]
+
+        response = f"""Database Status
+
+Path: {DATABASE_PATH}
+
+Snapshots:
+• Volume: {vol_count:,} rows
+  {vol_range[0] or 'N/A'} to {vol_range[1] or 'N/A'}
+• Price: {price_count:,} rows
+  {price_range[0] or 'N/A'} to {price_range[1] or 'N/A'}
+
+Other:
+• Users: {user_count}
+• Milestones: {milestone_count}
+• Watchlist: {watch_count}
+
+Commands ready:
+• /hot: {'YES' if vol_count >= 100 else 'NO (need more snapshots)'}
+• /movers: {'YES' if price_count >= 100 else 'NO (need more snapshots)'}
+
+Run /seed to populate test data."""
+
+        await update.message.reply_text(response)
+    except Exception as e:
+        logger.error(f"Error in dbstatus: {e}")
+        await update.message.reply_text(f"Error: {e}")
 
 
 async def main() -> None:
@@ -1230,6 +1367,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("unwatch", unwatch_command))
     application.add_handler(CommandHandler("watchlist", watchlist_command))
     application.add_handler(CommandHandler("digest", digest_command))
+    application.add_handler(CommandHandler("dbstatus", dbstatus_command))
 
     # Add callback handler for inline buttons
     application.add_handler(CallbackQueryHandler(settings_callback))
