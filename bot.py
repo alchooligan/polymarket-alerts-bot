@@ -42,76 +42,82 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Pagination cache for /new command: {user_id: {markets: [], page: 0, time_label: str, ...}}
+# Pagination cache: {user_id: {cmd_type: {markets: [], ...}}}
 from datetime import datetime, timezone
 from collections import defaultdict
 
-pagination_cache = defaultdict(dict)
+pagination_cache = defaultdict(lambda: defaultdict(dict))
 ITEMS_PER_PAGE = 10
 
 
-def format_new_page(markets: list, page: int, time_label: str, total_eligible: int,
-                    sports_filtered: int, resolved_filtered: int) -> tuple[str, InlineKeyboardMarkup]:
-    """Format a single page of /new results with navigation buttons."""
+def format_paginated_markets(
+    markets: list, page: int, cmd_type: str, header_text: str,
+    format_fn: callable = None, footer_text: str = ""
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Generic pagination formatter for market lists."""
     start_idx = page * ITEMS_PER_PAGE
     end_idx = start_idx + ITEMS_PER_PAGE
     page_markets = markets[start_idx:end_idx]
-    total_pages = (len(markets) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+    total_pages = max(1, (len(markets) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
 
-    header = f"""🆕 New Markets (last {time_label}) — Page {page + 1}/{total_pages}
+    # Add page indicator to header
+    header_with_page = header_text.rstrip() + f" — Page {page + 1}/{total_pages}\n"
+    lines = [header_with_page]
 
-Sorted by newest first.
-"""
-    lines = [header]
-
+    # Format each market
     for i, m in enumerate(page_markets, start_idx + 1):
-        title = _escape_markdown(m.get("title", "Unknown")[:50])
-        total_volume = m.get("total_volume", 0)
-        slug = m.get("slug", "")
-        hours_ago = m.get("hours_ago", 0)
-        velocity = m.get("velocity", 0)
-        velocity_pct = m.get("velocity_pct", 0)
-
-        vol_str = _format_volume(total_volume)
-        vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
-
-        # Velocity emoji
-        vel_emoji = ""
-        if velocity_pct >= 20:
-            vel_emoji = " 🔥🔥"
-        elif velocity_pct >= 10:
-            vel_emoji = " 🔥"
-
-        # Time ago string
-        if hours_ago < 1:
-            time_ago = f"{hours_ago*60:.0f}m ago"
-        else:
-            time_ago = f"{hours_ago:.0f}h ago"
-
-        # Format odds
-        odds_str = _format_odds(m)
-
         lines.append(f"━━━ {i} ━━━")
-        lines.append(f"[{title}](https://polymarket.com/event/{slug})")
-        lines.append(f"Launched: {time_ago}")
-        lines.append(f"Volume: {vol_str} | Vel: {vel_str}{vel_emoji}")
-        lines.append(f"Odds: {odds_str}")
+        if format_fn:
+            lines.append(format_fn(m))
+        else:
+            lines.append(format_market_card(m, style="full"))
         lines.append("")
 
-    # Footer with stats
-    lines.append(f"{len(markets)} new in {time_label} (of {total_eligible} eligible)")
-    lines.append(f"_Filtered: {sports_filtered} sports, {resolved_filtered} resolved_")
+    # Footer
+    if footer_text:
+        lines.append(footer_text)
 
     # Navigation buttons
     buttons = []
     if page > 0:
-        buttons.append(InlineKeyboardButton("◀ Prev", callback_data=f"new_page_{page - 1}"))
+        buttons.append(InlineKeyboardButton("◀ Prev", callback_data=f"{cmd_type}_page_{page - 1}"))
     if end_idx < len(markets):
-        buttons.append(InlineKeyboardButton("Next ▶", callback_data=f"new_page_{page + 1}"))
+        buttons.append(InlineKeyboardButton("Next ▶", callback_data=f"{cmd_type}_page_{page + 1}"))
 
     keyboard = InlineKeyboardMarkup([buttons]) if buttons else None
 
     return "\n".join(lines).strip(), keyboard
+
+
+def format_new_market(m: dict) -> str:
+    """Format a single market for /new command."""
+    title = _escape_markdown(m.get("title", "Unknown")[:50])
+    total_volume = m.get("total_volume", 0)
+    slug = m.get("slug", "")
+    hours_ago = m.get("hours_ago", 0)
+    velocity = m.get("velocity", 0)
+    velocity_pct = m.get("velocity_pct", 0)
+
+    vol_str = _format_volume(total_volume)
+    vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+
+    vel_emoji = ""
+    if velocity_pct >= 20:
+        vel_emoji = " 🔥🔥"
+    elif velocity_pct >= 10:
+        vel_emoji = " 🔥"
+
+    if hours_ago < 1:
+        time_ago = f"{hours_ago*60:.0f}m ago"
+    else:
+        time_ago = f"{hours_ago:.0f}h ago"
+
+    odds_str = _format_odds(m)
+
+    return f"""[{title}](https://polymarket.com/event/{slug})
+Launched: {time_ago}
+Volume: {vol_str} | Vel: {vel_str}{vel_emoji}
+Odds: {odds_str}"""
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -290,29 +296,24 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        # Fetch markets
-        events = await get_all_markets_paginated(target_count=2000, include_spam=False)
+        events = await get_all_markets_paginated(target_count=10000, include_spam=False)
 
         if not events:
             await update.message.reply_text("No markets found. Try again later.")
             return
 
-        # Filter out sports and resolved markets
         events = filter_sports(events)
         events = filter_resolved(events)
 
-        # Apply category filter if specified
         if category:
             events = filter_by_category(events, category)
 
         slugs = [e["slug"] for e in events]
 
-        # Get volume deltas for multiple windows
         deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
         deltas_6h = get_volume_deltas_bulk(slugs, hours=6)
         deltas_24h = get_volume_deltas_bulk(slugs, hours=24)
 
-        # Get price deltas
         price_deltas_6h = get_price_deltas_bulk(slugs, hours=6)
         price_deltas_24h = get_price_deltas_bulk(slugs, hours=24)
 
@@ -323,7 +324,6 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        # Build list with momentum scores
         markets_with_delta = []
         for event in events:
             slug = event["slug"]
@@ -332,25 +332,17 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 delta_6h = deltas_6h.get(slug, 0)
                 total_volume = event["total_volume"]
 
-                # Filter out giants (>$500K total volume) to force discovery
                 if total_volume > 500_000:
                     continue
 
-                # Only include positive velocity (growing markets)
                 if delta_1h > 0:
-                    # Calculate velocity as % of market per hour
                     velocity_pct = (delta_1h / total_volume * 100) if total_volume > 0 else 0
-
-                    # Calculate 6h volume growth %
                     volume_6h_ago = total_volume - delta_6h
                     volume_growth_pct = (delta_6h / volume_6h_ago * 100) if volume_6h_ago > 0 else 0
 
-                    # Get price change
                     price_data_6h = price_deltas_6h.get(slug, {})
                     price_change = abs(price_data_6h.get("delta", 0))
 
-                    # MOMENTUM SCORE: combines velocity %, volume growth %, and price change
-                    # Weight: velocity (40%) + volume growth (30%) + price change (30%)
                     momentum_score = (velocity_pct * 0.4) + (volume_growth_pct * 0.3) + (price_change * 0.3)
 
                     markets_with_delta.append({
@@ -366,7 +358,6 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                         "price_24h": price_deltas_24h.get(slug, {}),
                     })
 
-        # Sort by MOMENTUM SCORE (not raw velocity)
         markets_with_delta.sort(key=lambda x: x["momentum_score"], reverse=True)
 
         if not markets_with_delta:
@@ -377,32 +368,31 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        # Enrich markets with velocity data for format_market_card
         for m in markets_with_delta:
             m["velocity"] = m.get("delta_1h", 0)
             price_24h = m.get("price_24h", {})
             m["price_change_24h"] = price_24h.get("delta", 0)
 
-        # Format header with explanation
+        # Store in pagination cache
+        user_id = update.effective_user.id
         cat_label = f" [{category}]" if category else ""
         header = f"""🔍 Discover{cat_label}
 
 Small markets waking up, sorted by momentum score.
-Momentum = velocity % + volume growth % + price change.
-"""
+Momentum = velocity % + volume growth % + price change."""
 
-        # Format using market cards
-        lines = [header]
-        for i, m in enumerate(markets_with_delta[:count], 1):
-            lines.append(f"━━━ {i} ━━━")
-            lines.append(format_market_card(m, style="full"))
-            lines.append("")
+        pagination_cache[user_id]["discover"] = {
+            "markets": markets_with_delta,
+            "header": header,
+            "footer": f"{len(markets_with_delta)} markets with momentum",
+        }
 
-        if len(markets_with_delta) > count:
-            lines.append(f"+{len(markets_with_delta) - count} more. Use /hot for velocity focus.")
-
-        response = "\n".join(lines).strip()
-        await update.message.reply_text(response, parse_mode="Markdown", disable_web_page_preview=True)
+        message, keyboard = format_paginated_markets(
+            markets_with_delta, 0, "discover", header, None, f"{len(markets_with_delta)} markets with momentum"
+        )
+        await update.message.reply_text(
+            message, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=keyboard
+        )
 
     except Exception as e:
         logger.error(f"Error in discover: {e}")
@@ -415,8 +405,7 @@ async def underdogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     Markets with YES <20% where price is actually rising (someone betting against consensus).
     Usage: /underdogs [count]
     """
-    # Parse count from args
-    count = 8  # Default results
+    count = 8
     for arg in context.args:
         if arg.isdigit():
             count = min(int(arg), 50)
@@ -425,8 +414,7 @@ async def underdogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text("Finding underdogs with rising prices...")
 
     try:
-        # Get underdogs with price movement logic
-        underdogs = await check_underdog_alerts(target_count=500)
+        underdogs = await check_underdog_alerts(target_count=10000)
 
         if not underdogs:
             await update.message.reply_text(
@@ -439,32 +427,30 @@ async def underdogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             )
             return
 
-        # Enrich with data for format_market_card
         for m in underdogs:
             m["velocity"] = m.get("velocity", 0)
             m["price_change_24h"] = m.get("price_change", 0)
             m["velocity_pct"] = (m["velocity"] / m.get("total_volume", 1) * 100) if m.get("total_volume", 0) > 0 else 0
 
+        # Store in pagination cache
+        user_id = update.effective_user.id
         header = """🎯 Underdogs
 
 Long shots (YES <20%) with rising prices.
-Contrarian money moving the needle.
-"""
-        lines = [header]
+Contrarian money moving the needle."""
 
-        for i, m in enumerate(underdogs[:count], 1):
-            price_change = m.get("price_change", 0)
-            old_price = m.get("old_price", 0)
-            ctx = f"⬆️ Price: {old_price:.0f}% → {m['yes_price']:.0f}% (+{price_change:.0f}% in 24h)"
-            lines.append(f"━━━ {i} ━━━")
-            lines.append(format_market_card(m, style="full", context=ctx))
-            lines.append("")
+        pagination_cache[user_id]["underdogs"] = {
+            "markets": underdogs,
+            "header": header,
+            "footer": f"{len(underdogs)} underdogs rising",
+        }
 
-        if len(underdogs) > count:
-            lines.append(f"+{len(underdogs) - count} more underdogs rising.")
-
-        message = "\n".join(lines).strip()
-        await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
+        message, keyboard = format_paginated_markets(
+            underdogs, 0, "underdogs", header, None, f"{len(underdogs)} underdogs rising"
+        )
+        await update.message.reply_text(
+            message, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=keyboard
+        )
 
     except Exception as e:
         logger.error(f"Error in underdogs: {e}")
@@ -504,8 +490,8 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(status_msg + "...")
 
     try:
-        # Fetch markets
-        events = await get_all_markets_paginated(target_count=2000, include_spam=False)
+        # Fetch markets (10000 to cover full ecosystem)
+        events = await get_all_markets_paginated(target_count=10000, include_spam=False)
 
         if not events:
             await update.message.reply_text("No markets found. Try again later.")
@@ -592,26 +578,27 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             m["price_change_6h"] = price_data_6h.get("delta", 0)
             m["price_change_24h"] = price_data_24h.get("delta", 0)
 
-        # Format header with explanation
+        # Store in pagination cache
+        user_id = update.effective_user.id
         cat_label = f" [{category}]" if category else ""
         header = f"""🔥 Hot Markets ({time_label}){cat_label}
 
 Where money is flowing NOW.
-Sorted by velocity %/hr — fast movers, not just big markets.
-"""
+Sorted by velocity %/hr — fast movers, not just big markets."""
 
-        # Format using market cards
-        lines = [header]
-        for i, m in enumerate(hot_markets[:count], 1):
-            lines.append(f"━━━ {i} ━━━")
-            lines.append(format_market_card(m, style="full"))
-            lines.append("")
+        pagination_cache[user_id]["hot"] = {
+            "markets": hot_markets,
+            "header": header,
+            "footer": f"{len(hot_markets)} markets with positive velocity",
+        }
 
-        if len(hot_markets) > count:
-            lines.append(f"+{len(hot_markets) - count} more with positive velocity.")
-
-        message = "\n".join(lines).strip()
-        await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
+        # Format first page
+        message, keyboard = format_paginated_markets(
+            hot_markets, 0, "hot", header, None, f"{len(hot_markets)} markets with positive velocity"
+        )
+        await update.message.reply_text(
+            message, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=keyboard
+        )
 
     except Exception as e:
         logger.error(f"Error in hot: {e}")
@@ -650,7 +637,7 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(status_msg + "...")
 
     try:
-        events = await get_all_markets_paginated(target_count=2000, include_spam=False)
+        events = await get_all_markets_paginated(target_count=10000, include_spam=False)
 
         if not events:
             await update.message.reply_text("No markets found. Try again later.")
@@ -707,38 +694,36 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             slug = m.get("slug")
             total_volume = m.get("total_volume", 0)
 
-            # 6h volume data
             delta_6h = deltas_6h.get(slug, 0)
             m["delta_6h"] = delta_6h
             vol_6h_ago = total_volume - delta_6h
             m["volume_growth_pct"] = (delta_6h / vol_6h_ago * 100) if vol_6h_ago > 0 else 0
 
-            # Price data
             price_data_6h = price_deltas_6h.get(slug, {})
             price_data_24h = price_deltas_24h.get(slug, {})
             m["price_change_6h"] = price_data_6h.get("delta", 0)
             m["price_change_24h"] = price_data_24h.get("delta", 0)
 
+        # Store in pagination cache
+        user_id = update.effective_user.id
         cat_label = f" [{category}]" if category else ""
         header = f"""💰 Top Volume ({time_label}){cat_label}
 
 Most dollars flowing in — big money markets.
-Sorted by absolute $ added, not velocity %.
-"""
+Sorted by absolute $ added, not velocity %."""
 
-        lines = [header]
-        for i, m in enumerate(top_markets[:count], 1):
-            vol_added = m["volume_added"]
-            vol_str = f"+${vol_added/1000:.0f}K" if vol_added >= 1000 else f"+${vol_added:.0f}"
-            lines.append(f"━━━ {i}. {vol_str} ━━━")
-            lines.append(format_market_card(m, style="full"))
-            lines.append("")
+        pagination_cache[user_id]["top"] = {
+            "markets": top_markets,
+            "header": header,
+            "footer": f"{len(top_markets)} markets with volume growth",
+        }
 
-        if len(top_markets) > count:
-            lines.append(f"+{len(top_markets) - count} more with volume growth.")
-
-        message = "\n".join(lines).strip()
-        await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
+        message, keyboard = format_paginated_markets(
+            top_markets, 0, "top", header, None, f"{len(top_markets)} markets with volume growth"
+        )
+        await update.message.reply_text(
+            message, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=keyboard
+        )
 
     except Exception as e:
         logger.error(f"Error in top: {e}")
@@ -895,19 +880,23 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Sort by newest first (lowest hours_ago = most recent)
         new_markets.sort(key=lambda x: x["hours_ago"])
 
-        # Store in pagination cache for this user
+        # Store in pagination cache
         user_id = update.effective_user.id
-        pagination_cache[user_id] = {
+        cat_label = f" [{category}]" if category else ""
+        header = f"""🆕 New Markets (last {time_label}){cat_label}
+
+Sorted by newest first."""
+        footer = f"{len(new_markets)} new in {time_label} (of {len(events)} eligible)\n_Filtered: {sports_filtered} sports, {resolved_filtered} resolved_"
+
+        pagination_cache[user_id]["new"] = {
             "markets": new_markets,
-            "time_label": time_label,
-            "total_eligible": len(events),
-            "sports_filtered": sports_filtered,
-            "resolved_filtered": resolved_filtered,
+            "header": header,
+            "footer": footer,
         }
 
-        # Format first page with navigation buttons
-        message, keyboard = format_new_page(
-            new_markets, 0, time_label, len(events), sports_filtered, resolved_filtered
+        # Format first page
+        message, keyboard = format_paginated_markets(
+            new_markets, 0, "new", header, format_new_market, footer
         )
         await update.message.reply_text(
             message, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=keyboard
@@ -941,27 +930,20 @@ async def quiet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     await update.message.reply_text(status_msg + "...")
 
     try:
-        # Fetch markets
-        events = await get_all_markets_paginated(target_count=2000, include_spam=False)
+        events = await get_all_markets_paginated(target_count=10000, include_spam=False)
 
         if not events:
             await update.message.reply_text("No markets found. Try again later.")
             return
 
-        # Filter out sports and resolved markets
         events = filter_sports(events)
         events = filter_resolved(events)
 
-        # Apply category filter if specified
         if category:
             events = filter_by_category(events, category)
 
         slugs = [e["slug"] for e in events]
-
-        # Get volume deltas for 1h
         deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
-
-        # Get price deltas for 24h
         price_deltas_24h = get_price_deltas_bulk(slugs, hours=24)
 
         sleeping_giants = []
@@ -969,20 +951,15 @@ async def quiet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         for event in events:
             slug = event["slug"]
             total_volume = event["total_volume"]
-            yes_price = event["yes_price"]
 
-            # Must be a big market ($100K+)
             if total_volume < 100_000:
                 continue
 
             velocity = deltas_1h.get(slug, 0)
-
-            # Low velocity (<1% of market per hour)
             velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
             if velocity_pct > 1:
                 continue
 
-            # Stable price (moved less than ±2% in 24h)
             price_data = price_deltas_24h.get(slug, {})
             price_change = abs(price_data.get("delta", 0))
             if price_change > 2:
@@ -995,7 +972,6 @@ async def quiet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 "price_change_24h": price_data.get("delta", 0),
             })
 
-        # Sort by volume (biggest first)
         sleeping_giants.sort(key=lambda x: x["total_volume"], reverse=True)
 
         if not sleeping_giants:
@@ -1009,30 +985,26 @@ async def quiet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             )
             return
 
-        # Enrich with data for format_market_card
-        for m in sleeping_giants:
-            m["velocity"] = m.get("velocity", 0)
-            m["price_change_24h"] = m.get("price_change_24h", 0)
-
+        # Store in pagination cache
+        user_id = update.effective_user.id
         cat_label = f" [{category}]" if category else ""
         header = f"""💤 Sleeping Giants{cat_label}
 
 Big markets ($100K+) with low activity.
-Could wake up anytime with the right catalyst.
-"""
-        lines = [header]
+Could wake up anytime with the right catalyst."""
 
-        for i, m in enumerate(sleeping_giants[:count], 1):
-            ctx = f"💤 Activity: {m['velocity_pct']:.2f}%/hr — sleeping"
-            lines.append(f"━━━ {i} ━━━")
-            lines.append(format_market_card(m, style="full", context=ctx))
-            lines.append("")
+        pagination_cache[user_id]["quiet"] = {
+            "markets": sleeping_giants,
+            "header": header,
+            "footer": f"{len(sleeping_giants)} sleeping giants",
+        }
 
-        if len(sleeping_giants) > count:
-            lines.append(f"+{len(sleeping_giants) - count} more sleeping giants.")
-
-        message = "\n".join(lines).strip()
-        await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
+        message, keyboard = format_paginated_markets(
+            sleeping_giants, 0, "quiet", header, None, f"{len(sleeping_giants)} sleeping giants"
+        )
+        await update.message.reply_text(
+            message, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=keyboard
+        )
 
     except Exception as e:
         logger.error(f"Error in quiet: {e}")
@@ -1079,41 +1051,31 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(status_msg + "...")
 
     try:
-        # Fetch markets
-        events = await get_all_markets_paginated(target_count=2000, include_spam=False)
+        events = await get_all_markets_paginated(target_count=10000, include_spam=False)
 
         if not events:
             await update.message.reply_text("No markets found. Try again later.")
             return
 
-        # Filter out sports and resolved markets
         events = filter_sports(events)
         events = filter_resolved(events)
 
-        # Apply category filter if specified
         if category:
             events = filter_by_category(events, category)
 
         slugs = [e["slug"] for e in events]
-
-        # Get price deltas for specified time window
         price_deltas = get_price_deltas_bulk(slugs, hours=hours)
-
-        # Get velocity for context
         deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
 
         movers = []
-
         for event in events:
             slug = event["slug"]
             total_volume = event["total_volume"]
 
-            # Get price change for the specified window
             price_data = price_deltas.get(slug, {})
             price_change = price_data.get("delta", 0)
             old_price = price_data.get("old", 0)
 
-            # Must have meaningful move (threshold scales with time window)
             if abs(price_change) < threshold:
                 continue
 
@@ -1128,13 +1090,10 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "velocity_pct": velocity_pct,
             })
 
-        # Sort by absolute price change (biggest swings first)
         movers.sort(key=lambda x: abs(x["price_change"]), reverse=True)
 
         if not movers:
             cat_msg = f" in {category}" if category else ""
-
-            # Check if we have price data at all
             has_price_data = len(price_deltas) > 0
 
             if not has_price_data:
@@ -1152,44 +1111,30 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 )
             return
 
-        # Enrich with data for format_market_card
+        # Enrich for display
         for m in movers:
-            m["velocity"] = m.get("velocity", 0)
             m["price_change_24h"] = m.get("price_change", 0)
 
-        # Split into gainers and losers (half of count each)
-        half_count = max(count // 2, 3)
-        gainers = [m for m in movers if m["price_change"] > 0][:half_count]
-        losers = [m for m in movers if m["price_change"] < 0][:half_count]
-
+        # Store in pagination cache
+        user_id = update.effective_user.id
         cat_label = f" [{category}]" if category else ""
         header = f"""📊 Biggest Movers ({time_label}){cat_label}
 
 Prices changed = opinions shifted.
-Something happened in these markets.
-"""
-        lines = [header]
+Sorted by absolute price swing."""
 
-        if gainers:
-            lines.append("⬆️ GAINERS:")
-            lines.append("")
-            for i, m in enumerate(gainers, 1):
-                emoji = "🚀" if m["price_change"] >= 15 else "⬆️"
-                context = f"{emoji} Price: {m['old_price']:.0f}% → {m['yes_price']:.0f}% (+{m['price_change']:.0f}%)"
-                lines.append(format_market_card(m, style="full", context=context))
-                lines.append("")
+        pagination_cache[user_id]["movers"] = {
+            "markets": movers,
+            "header": header,
+            "footer": f"{len(movers)} markets moved >={threshold}%",
+        }
 
-        if losers:
-            lines.append("⬇️ LOSERS:")
-            lines.append("")
-            for i, m in enumerate(losers, 1):
-                emoji = "💀" if m["price_change"] <= -15 else "⬇️"
-                context = f"{emoji} Price: {m['old_price']:.0f}% → {m['yes_price']:.0f}% ({m['price_change']:.0f}%)"
-                lines.append(format_market_card(m, style="full", context=context))
-                lines.append("")
-
-        message = "\n".join(lines).strip()
-        await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
+        message, keyboard = format_paginated_markets(
+            movers, 0, "movers", header, None, f"{len(movers)} markets moved >={threshold}%"
+        )
+        await update.message.reply_text(
+            message, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=keyboard
+        )
 
     except Exception as e:
         logger.error(f"Error in movers: {e}")
@@ -1248,21 +1193,29 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     telegram_user = update.effective_user
     callback_data = query.data
+    user_id = telegram_user.id
 
-    # Handle pagination for /new command
-    if callback_data.startswith("new_page_"):
-        page = int(callback_data.replace("new_page_", ""))
-        user_id = telegram_user.id
+    # Handle pagination for any command (format: cmd_page_N)
+    if "_page_" in callback_data:
+        parts = callback_data.rsplit("_page_", 1)
+        cmd_type = parts[0]
+        page = int(parts[1])
 
-        # Get cached data
-        cache = pagination_cache.get(user_id)
+        # Get cached data for this command
+        cache = pagination_cache.get(user_id, {}).get(cmd_type)
         if not cache:
-            await query.edit_message_text("Session expired. Please run /new again.")
+            await query.edit_message_text(f"Session expired. Please run /{cmd_type} again.")
             return
 
-        message, keyboard = format_new_page(
-            cache["markets"], page, cache["time_label"],
-            cache["total_eligible"], cache["sports_filtered"], cache["resolved_filtered"]
+        # Get appropriate format function
+        format_fns = {
+            "new": format_new_market,
+            # Other commands use format_market_card (None = default)
+        }
+        format_fn = format_fns.get(cmd_type)
+
+        message, keyboard = format_paginated_markets(
+            cache["markets"], page, cmd_type, cache["header"], format_fn, cache.get("footer", "")
         )
         await query.edit_message_text(
             message, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=keyboard
