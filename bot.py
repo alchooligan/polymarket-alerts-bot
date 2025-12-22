@@ -31,6 +31,7 @@ from alerts import (
     get_available_categories,
     _format_volume,
     _format_odds,
+    _escape_markdown,
     format_market_card,
 )
 
