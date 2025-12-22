@@ -1950,16 +1950,15 @@ async def check_whale_trades(
     from database import get_unseen_trade_ids, record_whale_trades_bulk
     from config import WHALE_TRADE_MIN, WHALE_TRADE_MEGA
 
-    # Fetch recent trades
-    trades = await fetch_recent_trades(limit=limit)
+    # Fetch trades with API-level size filtering (more efficient)
+    trades = await fetch_recent_trades(limit=limit, min_size=min_size)
 
     if not trades:
         return []
 
-    # Filter for large trades
+    # Double-check size filter (API might not filter perfectly)
     large_trades = []
     for t in trades:
-        # Get trade size - try different field names
         size = 0
         if "size" in t:
             try:
@@ -1996,7 +1995,16 @@ async def check_whale_trades(
 
         # Build whale trade record - Data API includes title/slug/outcome directly!
         size = float(t.get("size", 0) or t.get("amount", 0))
-        price = float(t.get("price", 0)) * 100 if t.get("price") else 0
+
+        # Parse price - API returns 0-1 scale, convert to percentage
+        raw_price = t.get("price")
+        if raw_price is not None:
+            try:
+                price = float(raw_price) * 100
+            except (ValueError, TypeError):
+                price = 0
+        else:
+            price = 0
 
         # Get market info directly from trade (Data API includes these)
         market_title = t.get("title", "")

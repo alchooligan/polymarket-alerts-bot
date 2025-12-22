@@ -204,25 +204,35 @@ async def fetch_price_history(
         return []
 
 
-async def fetch_recent_trades(limit: int = 100) -> list[dict]:
+async def fetch_recent_trades(
+    limit: int = 100,
+    min_size: float = None,
+) -> list[dict]:
     """
     Fetch recent trades from the Polymarket Data API.
     Returns trades sorted by timestamp descending (most recent first).
 
     Args:
         limit: Maximum number of trades to fetch
+        min_size: Minimum trade size in USDC (optional, uses filterType=CASH)
 
     Returns:
         List of trade dictionaries with fields like:
         - id: trade ID
         - asset: token/asset ID
         - size: trade size in dollars
-        - price: execution price
+        - price: execution price (0-1 scale)
         - side: BUY or SELL
         - timestamp: trade timestamp
+        - title, slug, eventSlug, outcome: market info
     """
     url = f"{DATA_API_BASE}/trades"
     params = {"limit": limit}
+
+    # Add size filter if specified (API-level filtering is more efficient)
+    if min_size is not None and min_size > 0:
+        params["filterType"] = "CASH"
+        params["filterAmount"] = str(min_size)
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
