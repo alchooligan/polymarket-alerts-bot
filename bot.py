@@ -42,6 +42,77 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Pagination cache for /new command: {user_id: {markets: [], page: 0, time_label: str, ...}}
+from datetime import datetime, timezone
+from collections import defaultdict
+
+pagination_cache = defaultdict(dict)
+ITEMS_PER_PAGE = 10
+
+
+def format_new_page(markets: list, page: int, time_label: str, total_eligible: int,
+                    sports_filtered: int, resolved_filtered: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Format a single page of /new results with navigation buttons."""
+    start_idx = page * ITEMS_PER_PAGE
+    end_idx = start_idx + ITEMS_PER_PAGE
+    page_markets = markets[start_idx:end_idx]
+    total_pages = (len(markets) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+
+    header = f"""🆕 New Markets (last {time_label}) — Page {page + 1}/{total_pages}
+
+Sorted by volume — money flowing to fresh markets.
+"""
+    lines = [header]
+
+    for i, m in enumerate(page_markets, start_idx + 1):
+        title = _escape_markdown(m.get("title", "Unknown")[:50])
+        total_volume = m.get("total_volume", 0)
+        slug = m.get("slug", "")
+        hours_ago = m.get("hours_ago", 0)
+        velocity = m.get("velocity", 0)
+        velocity_pct = m.get("velocity_pct", 0)
+
+        vol_str = _format_volume(total_volume)
+        vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+
+        # Velocity emoji
+        vel_emoji = ""
+        if velocity_pct >= 20:
+            vel_emoji = " 🔥🔥"
+        elif velocity_pct >= 10:
+            vel_emoji = " 🔥"
+
+        # Time ago string
+        if hours_ago < 1:
+            time_ago = f"{hours_ago*60:.0f}m ago"
+        else:
+            time_ago = f"{hours_ago:.0f}h ago"
+
+        # Format odds
+        odds_str = _format_odds(m)
+
+        lines.append(f"━━━ {i} ━━━")
+        lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+        lines.append(f"Launched: {time_ago}")
+        lines.append(f"Volume: {vol_str} | Vel: {vel_str}{vel_emoji}")
+        lines.append(f"Odds: {odds_str}")
+        lines.append("")
+
+    # Footer with stats
+    lines.append(f"{len(markets)} new in {time_label} (of {total_eligible} eligible)")
+    lines.append(f"_Filtered: {sports_filtered} sports, {resolved_filtered} resolved_")
+
+    # Navigation buttons
+    buttons = []
+    if page > 0:
+        buttons.append(InlineKeyboardButton("◀ Prev", callback_data=f"new_page_{page - 1}"))
+    if end_idx < len(markets):
+        buttons.append(InlineKeyboardButton("Next ▶", callback_data=f"new_page_{page + 1}"))
+
+    keyboard = InlineKeyboardMarkup([buttons]) if buttons else None
+
+    return "\n".join(lines).strip(), keyboard
+
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /start command."""
@@ -813,58 +884,23 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Sort by volume (highest first)
         new_markets.sort(key=lambda x: x["total_volume"], reverse=True)
 
-        # Format with explanation
-        header = f"""🆕 New Markets (last {time_label})
+        # Store in pagination cache for this user
+        user_id = update.effective_user.id
+        pagination_cache[user_id] = {
+            "markets": new_markets,
+            "time_label": time_label,
+            "total_eligible": len(events),
+            "sports_filtered": sports_filtered,
+            "resolved_filtered": resolved_filtered,
+        }
 
-Sorted by volume — money flowing to fresh markets.
-"""
-        lines = [header]
-
-        for i, m in enumerate(new_markets[:count], 1):
-            title = _escape_markdown(m.get("title", "Unknown")[:50])
-            total_volume = m.get("total_volume", 0)
-            yes_price = m.get("yes_price", 0)
-            slug = m.get("slug", "")
-            hours_ago = m.get("hours_ago", 0)
-            velocity = m.get("velocity", 0)
-            velocity_pct = m.get("velocity_pct", 0)
-
-            vol_str = _format_volume(total_volume)
-            vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
-
-            # Velocity emoji
-            vel_emoji = ""
-            if velocity_pct >= 20:
-                vel_emoji = " 🔥🔥"
-            elif velocity_pct >= 10:
-                vel_emoji = " 🔥"
-
-            # Time ago string
-            if hours_ago < 1:
-                time_ago = f"{hours_ago*60:.0f}m ago"
-            else:
-                time_ago = f"{hours_ago:.0f}h ago"
-
-            # Format odds
-            odds_str = _format_odds(m)
-
-            lines.append(f"━━━ {i} ━━━")
-            lines.append(f"[{title}](https://polymarket.com/event/{slug})")
-            lines.append("")
-            lines.append(f"Launched: {time_ago}")
-            lines.append(f"Volume: {vol_str} | Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
-            lines.append(f"Odds: {odds_str}")
-            lines.append("")
-
-        if len(new_markets) > count:
-            lines.append(f"+{len(new_markets) - count} more new markets")
-
-        # Show filter breakdown
-        lines.append(f"\n{len(new_markets)} new in {time_label} (of {len(events)} eligible)")
-        lines.append(f"_Filtered: {sports_filtered} sports, {resolved_filtered} resolved_")
-
-        message = "\n".join(lines).strip()
-        await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
+        # Format first page with navigation buttons
+        message, keyboard = format_new_page(
+            new_markets, 0, time_label, len(events), sports_filtered, resolved_filtered
+        )
+        await update.message.reply_text(
+            message, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=keyboard
+        )
 
     except Exception as e:
         logger.error(f"Error in new: {e}")
@@ -1194,15 +1230,35 @@ On-demand commands (no toggle needed):
     await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
-async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle inline button presses for settings."""
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle all inline button presses (settings, pagination, etc.)."""
     query = update.callback_query
     await query.answer()  # Acknowledge the button press
 
     telegram_user = update.effective_user
     callback_data = query.data
 
-    # Toggle alerts
+    # Handle pagination for /new command
+    if callback_data.startswith("new_page_"):
+        page = int(callback_data.replace("new_page_", ""))
+        user_id = telegram_user.id
+
+        # Get cached data
+        cache = pagination_cache.get(user_id)
+        if not cache:
+            await query.edit_message_text("Session expired. Please run /new again.")
+            return
+
+        message, keyboard = format_new_page(
+            cache["markets"], page, cache["time_label"],
+            cache["total_eligible"], cache["sports_filtered"], cache["resolved_filtered"]
+        )
+        await query.edit_message_text(
+            message, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=keyboard
+        )
+        return
+
+    # Toggle alerts (settings)
     if callback_data == "toggle_new_markets":
         new_value = toggle_user_setting(telegram_user.id, "new_markets_enabled")
         status = "ON" if new_value else "OFF"
@@ -1775,7 +1831,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("dbstatus", dbstatus_command))
 
     # Add callback handler for inline buttons
-    application.add_handler(CallbackQueryHandler(settings_callback))
+    application.add_handler(CallbackQueryHandler(callback_handler))
 
     # Start the bot using async context
     async with application:
