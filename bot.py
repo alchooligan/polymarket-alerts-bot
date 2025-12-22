@@ -704,6 +704,9 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         elif arg_lower in ["48h", "48"]:
             hours = 48
             time_label = "48h"
+        elif arg_lower in ["7d", "168h", "168"]:
+            hours = 168
+            time_label = "7d"
         elif arg.isdigit():
             count = min(int(arg), 50)
 
@@ -732,23 +735,35 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
             # Parse creation time
             try:
-                if isinstance(created_at, str):
+                created_str = created_at
+                if isinstance(created_str, str):
                     # Handle various date formats
-                    created_at = created_at.replace("Z", "+00:00")
-                    if "T" in created_at:
-                        created_dt = datetime.fromisoformat(created_at)
+                    created_str = created_str.replace("Z", "+00:00")
+
+                    # Try ISO format first
+                    if "T" in created_str:
+                        created_dt = datetime.fromisoformat(created_str)
                     else:
-                        created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
-                        created_dt = created_dt.replace(tzinfo=timezone.utc)
+                        # Try common formats
+                        for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S.%f"]:
+                            try:
+                                created_dt = datetime.strptime(created_str.split("+")[0].split(".")[0], fmt)
+                                created_dt = created_dt.replace(tzinfo=timezone.utc)
+                                break
+                            except ValueError:
+                                continue
+                        else:
+                            continue  # No format matched
                 else:
-                    created_dt = created_at.replace(tzinfo=timezone.utc) if created_at.tzinfo is None else created_at
+                    created_dt = created_str.replace(tzinfo=timezone.utc) if created_str.tzinfo is None else created_str
 
                 # Check if within time window
                 if created_dt.timestamp() < cutoff:
                     continue
 
                 hours_ago = (now - created_dt).total_seconds() / 3600
-            except Exception:
+            except Exception as e:
+                logger.debug(f"Date parse error for {event.get('slug')}: {e}")
                 continue
 
             total_volume = event.get("total_volume", 0)
@@ -770,10 +785,24 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             })
 
         if not new_markets:
-            await update.message.reply_text(
-                f"No new markets in the last {time_label}.\n"
-                "Try /new 48h for a wider window."
-            )
+            # Debug: count events with/without created_at
+            with_date = sum(1 for e in events if e.get("created_at"))
+            without_date = len(events) - with_date
+
+            logger.warning(f"/new debug: {len(events)} events total, {with_date} with created_at, {without_date} without")
+
+            if with_date == 0:
+                await update.message.reply_text(
+                    f"No creation dates available from API.\n"
+                    f"Scanned {len(events)} markets.\n\n"
+                    f"Try /discover or /hot instead."
+                )
+            else:
+                await update.message.reply_text(
+                    f"No markets created in the last {time_label}.\n"
+                    f"({with_date} markets have dates, all older than {time_label})\n\n"
+                    f"Try /new 48h or /new 168h (7 days)"
+                )
             return
 
         # Sort by volume (highest first)
