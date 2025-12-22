@@ -713,8 +713,8 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(f"Finding new markets (last {time_label})...")
 
     try:
-        # Get markets directly from API
-        events = await get_all_markets_paginated(target_count=1000, include_spam=False)
+        # Get ALL markets from API (Polymarket has ~2000-3000 active)
+        events = await get_all_markets_paginated(target_count=10000, include_spam=False)
         events = filter_sports(events)
         events = filter_resolved(events)
 
