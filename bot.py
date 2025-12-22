@@ -1146,17 +1146,10 @@ def build_settings_keyboard(user: dict) -> InlineKeyboardMarkup:
     alerts_enabled = user.get("new_markets_enabled", False)
     alerts_status = "ON" if alerts_enabled else "OFF"
 
-    whale_enabled = user.get("whale_alerts_enabled", True)
-    whale_status = "ON" if whale_enabled else "OFF"
-
     keyboard = [
         [InlineKeyboardButton(
             f"Push Alerts: {alerts_status}",
             callback_data="toggle_new_markets"
-        )],
-        [InlineKeyboardButton(
-            f"Whale Alerts ($50K+): {whale_status}",
-            callback_data="toggle_whale_alerts"
         )],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -1174,10 +1167,6 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 • Fast Mover (price moved with volume)
 • Early Heat (new market gaining traction)
 • Watchlist price moves (5%+)
-
-*Whale Alerts* ($50K+ trades):
-• Large trade alerts (follow the money)
-• Mega whale alerts ($100K+)
 
 On-demand commands (no toggle needed):
 • /hot, /movers, /new, /top"""
@@ -1227,10 +1216,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         new_value = toggle_user_setting(telegram_user.id, "new_markets_enabled")
         status = "ON" if new_value else "OFF"
         logger.info(f"User {telegram_user.id} toggled alerts to {status}")
-    elif callback_data == "toggle_whale_alerts":
-        new_value = toggle_user_setting(telegram_user.id, "whale_alerts_enabled")
-        status = "ON" if new_value else "OFF"
-        logger.info(f"User {telegram_user.id} toggled whale alerts to {status}")
 
     # Refresh the keyboard with updated settings
     user = get_or_create_user(telegram_user.id, telegram_user.username)
@@ -1243,10 +1228,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 • Fast Mover (price moved with volume)
 • Early Heat (new market gaining traction)
 • Watchlist price moves (5%+)
-
-*Whale Alerts* ($50K+ trades):
-• Large trade alerts (follow the money)
-• Mega whale alerts ($100K+)
 
 On-demand commands (no toggle needed):
 • /hot, /movers, /new, /top"""
@@ -1756,72 +1737,6 @@ Run /seed to populate test data."""
         await update.message.reply_text(f"Error: {e}")
 
 
-async def testwhale_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Test whale alert detection.
-    Usage: /testwhale [min_size] - defaults to $1000 to see any trades
-    """
-    from alerts import check_whale_trades, format_whale_alert, format_bundled_whale_alerts
-
-    # Parse minimum size (default $1000 for testing)
-    min_size = 1000
-    for arg in context.args:
-        if arg.isdigit():
-            min_size = int(arg)
-            break
-
-    await update.message.reply_text(f"Checking for trades >= ${min_size:,}...")
-
-    try:
-        # Fetch trades with lower threshold for testing (record=False to not mark as seen)
-        trades = await check_whale_trades(min_size=min_size, limit=100, record=False)
-
-        if not trades:
-            await update.message.reply_text(
-                f"No trades >= ${min_size:,} found in recent trades.\n\n"
-                "This could mean:\n"
-                "1. API not returning trades\n"
-                "2. No large trades recently\n"
-                "3. All large trades already seen\n\n"
-                "Try /testwhale 100 to see smaller trades."
-            )
-            return
-
-        # Show what we found
-        lines = [f"Found {len(trades)} trades >= ${min_size:,}:\n"]
-
-        for i, t in enumerate(trades[:10], 1):
-            size = t.get("size", 0)
-            title = t.get("market_title", "Unknown")[:35]
-            side = t.get("side", "?")
-            outcome = t.get("outcome", "?")
-            price = t.get("price", 0)
-            slug = t.get("event_slug", "")
-
-            size_str = f"${size/1000:.1f}K" if size >= 1000 else f"${size:.0f}"
-            lines.append(f"{i}. {size_str} {side} {outcome} @ {price:.0f}%")
-            lines.append(f"   {title}")
-            if slug:
-                lines.append(f"   polymarket.com/event/{slug}")
-            lines.append("")
-
-        if len(trades) > 10:
-            lines.append(f"+{len(trades) - 10} more trades")
-
-        # Show sample formatted alert (plain text, no markdown issues)
-        lines.append("\n--- Sample Alert ---")
-        sample = trades[0]
-        whale_emoji = "WHALE" if sample.get("is_mega") else "Whale"
-        lines.append(f"{whale_emoji}: {sample.get('market_title', 'Unknown')[:40]}")
-        lines.append(f"${sample.get('size', 0)/1000:.1f}K {sample.get('side', '?')} {sample.get('outcome', '?')} at {sample.get('price', 0):.0f}%")
-
-        await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
-
-    except Exception as e:
-        logger.error(f"Error in testwhale: {e}")
-        await update.message.reply_text(f"Error: {e}")
-
-
 async def main() -> None:
     """Start the bot."""
     # Check for token
@@ -1859,7 +1774,6 @@ async def main() -> None:
     application.add_handler(CommandHandler("watchlist", watchlist_command))
     application.add_handler(CommandHandler("digest", digest_command))
     application.add_handler(CommandHandler("dbstatus", dbstatus_command))
-    application.add_handler(CommandHandler("testwhale", testwhale_command))
 
     # Add callback handler for inline buttons
     application.add_handler(CallbackQueryHandler(callback_handler))
