@@ -430,6 +430,8 @@ async def get_unique_events(limit: int = 100, include_spam: bool = False) -> lis
 
     for event in events:
         markets = extract_market_info(event)
+        raw_markets = event.get("markets", [])
+        is_multi_outcome = len(raw_markets) > 1
 
         for market in markets:
             # Skip spam unless requested
@@ -448,23 +450,52 @@ async def get_unique_events(limit: int = 100, include_spam: bool = False) -> lis
                     "tags": market["tags"],
                     "end_date": market["end_date"],
                     "outcomes": market.get("outcomes", []),
-                    "all_outcomes": list(market.get("outcomes", [])),
+                    "is_multi_outcome": is_multi_outcome,
+                    # For multi-outcome: collect market questions as event outcomes
+                    "event_outcomes": [],
                 }
-            else:
-                # Add volume from additional markets in same event
+
+            # Add volume from additional markets in same event
+            if slug in event_map and event_map[slug]["total_volume"] != market["volume"]:
                 event_map[slug]["total_volume"] += market["volume"]
-                # Aggregate outcomes
-                for outcome in market.get("outcomes", []):
-                    existing = next((o for o in event_map[slug]["all_outcomes"] if o["name"] == outcome["name"]), None)
-                    if existing:
-                        if outcome["price"] > existing["price"]:
-                            existing["price"] = outcome["price"]
-                    else:
-                        event_map[slug]["all_outcomes"].append(outcome)
-                # Keep the highest YES price (most interesting outcome)
-                if market["yes_price"] > event_map[slug]["yes_price"]:
-                    event_map[slug]["yes_price"] = market["yes_price"]
-                    event_map[slug]["outcomes"] = market.get("outcomes", [])
+
+            # For multi-outcome events, use market question as outcome name
+            if is_multi_outcome:
+                question = market.get("question", "")
+                if question and question != market["title"]:
+                    # Extract short name from question (remove "Will X happen?" patterns)
+                    outcome_name = question
+                    # Try to extract just the key part
+                    if question.lower().startswith("will "):
+                        outcome_name = question[5:]
+                        # Remove trailing "?" and common suffixes
+                        outcome_name = outcome_name.rstrip("?").strip()
+                        # If it ends with common patterns, trim
+                        for suffix in [" happen", " be ", " win", " occur"]:
+                            if suffix in outcome_name.lower():
+                                idx = outcome_name.lower().find(suffix)
+                                outcome_name = outcome_name[:idx].strip()
+                                break
+                    # Truncate long names
+                    if len(outcome_name) > 25:
+                        outcome_name = outcome_name[:22] + "..."
+
+                    event_map[slug]["event_outcomes"].append({
+                        "name": outcome_name,
+                        "price": market["yes_price"],
+                    })
+
+            # Keep the highest YES price
+            if market["yes_price"] > event_map[slug]["yes_price"]:
+                event_map[slug]["yes_price"] = market["yes_price"]
+                event_map[slug]["outcomes"] = market.get("outcomes", [])
+
+    # Sort event_outcomes by price and set as primary outcomes for multi-outcome events
+    for slug, data in event_map.items():
+        if data.get("is_multi_outcome") and data.get("event_outcomes"):
+            data["event_outcomes"].sort(key=lambda x: x["price"], reverse=True)
+            # Use event_outcomes as the display outcomes
+            data["outcomes"] = data["event_outcomes"][:10]  # Top 10 max
 
     # Convert to list and sort by volume descending
     unique_events = list(event_map.values())
@@ -493,6 +524,8 @@ async def get_popular_markets(limit: int = 100, include_spam: bool = False) -> l
 
     for event in events:
         markets = extract_market_info(event)
+        raw_markets = event.get("markets", [])
+        is_multi_outcome = len(raw_markets) > 1
 
         for market in markets:
             # Skip spam unless requested
@@ -510,21 +543,44 @@ async def get_popular_markets(limit: int = 100, include_spam: bool = False) -> l
                     "tags": market["tags"],
                     "end_date": market["end_date"],
                     "outcomes": market.get("outcomes", []),
-                    "all_outcomes": list(market.get("outcomes", [])),
+                    "is_multi_outcome": is_multi_outcome,
+                    "event_outcomes": [],
                 }
-            else:
+
+            # Add volume from additional markets in same event
+            if slug in event_map and event_map[slug]["total_volume"] != market["volume"]:
                 event_map[slug]["total_volume"] += market["volume"]
-                # Aggregate outcomes
-                for outcome in market.get("outcomes", []):
-                    existing = next((o for o in event_map[slug]["all_outcomes"] if o["name"] == outcome["name"]), None)
-                    if existing:
-                        if outcome["price"] > existing["price"]:
-                            existing["price"] = outcome["price"]
-                    else:
-                        event_map[slug]["all_outcomes"].append(outcome)
-                if market["yes_price"] > event_map[slug]["yes_price"]:
-                    event_map[slug]["yes_price"] = market["yes_price"]
-                    event_map[slug]["outcomes"] = market.get("outcomes", [])
+
+            # For multi-outcome events, use market question as outcome name
+            if is_multi_outcome:
+                question = market.get("question", "")
+                if question and question != market["title"]:
+                    outcome_name = question
+                    if question.lower().startswith("will "):
+                        outcome_name = question[5:]
+                        outcome_name = outcome_name.rstrip("?").strip()
+                        for suffix in [" happen", " be ", " win", " occur"]:
+                            if suffix in outcome_name.lower():
+                                idx = outcome_name.lower().find(suffix)
+                                outcome_name = outcome_name[:idx].strip()
+                                break
+                    if len(outcome_name) > 25:
+                        outcome_name = outcome_name[:22] + "..."
+
+                    event_map[slug]["event_outcomes"].append({
+                        "name": outcome_name,
+                        "price": market["yes_price"],
+                    })
+
+            if market["yes_price"] > event_map[slug]["yes_price"]:
+                event_map[slug]["yes_price"] = market["yes_price"]
+                event_map[slug]["outcomes"] = market.get("outcomes", [])
+
+    # Sort event_outcomes by price and set as primary outcomes for multi-outcome events
+    for slug, data in event_map.items():
+        if data.get("is_multi_outcome") and data.get("event_outcomes"):
+            data["event_outcomes"].sort(key=lambda x: x["price"], reverse=True)
+            data["outcomes"] = data["event_outcomes"][:10]
 
     # Convert to list (already sorted by volume from API, but re-sort to be safe)
     unique_events = list(event_map.values())
@@ -560,6 +616,8 @@ async def get_all_markets_paginated(
 
     for event in events:
         markets = extract_market_info(event)
+        raw_markets = event.get("markets", [])
+        is_multi_outcome = len(raw_markets) > 1
 
         for market in markets:
             if not include_spam and market["is_spam"]:
@@ -576,25 +634,46 @@ async def get_all_markets_paginated(
                     "tags": market["tags"],
                     "end_date": market["end_date"],
                     "created_at": market.get("created_at", ""),
-                    "outcomes": market.get("outcomes", []),  # Store outcomes
-                    "all_outcomes": list(market.get("outcomes", [])),  # Collect all outcomes across markets
+                    "outcomes": market.get("outcomes", []),
+                    "is_multi_outcome": is_multi_outcome,
+                    "event_outcomes": [],
                 }
-            else:
+
+            # Add volume from additional markets in same event
+            if slug in event_map and event_map[slug]["total_volume"] != market["volume"]:
                 event_map[slug]["total_volume"] += market["volume"]
-                # Add outcomes from this market to the all_outcomes list
-                for outcome in market.get("outcomes", []):
-                    # Check if this outcome name already exists
-                    existing = next((o for o in event_map[slug]["all_outcomes"] if o["name"] == outcome["name"]), None)
-                    if existing:
-                        # Update price if higher
-                        if outcome["price"] > existing["price"]:
-                            existing["price"] = outcome["price"]
-                    else:
-                        event_map[slug]["all_outcomes"].append(outcome)
-                # Keep the highest YES price
-                if market["yes_price"] > event_map[slug]["yes_price"]:
-                    event_map[slug]["yes_price"] = market["yes_price"]
-                    event_map[slug]["outcomes"] = market.get("outcomes", [])
+
+            # For multi-outcome events, use market question as outcome name
+            if is_multi_outcome:
+                question = market.get("question", "")
+                if question and question != market["title"]:
+                    outcome_name = question
+                    if question.lower().startswith("will "):
+                        outcome_name = question[5:]
+                        outcome_name = outcome_name.rstrip("?").strip()
+                        for suffix in [" happen", " be ", " win", " occur"]:
+                            if suffix in outcome_name.lower():
+                                idx = outcome_name.lower().find(suffix)
+                                outcome_name = outcome_name[:idx].strip()
+                                break
+                    if len(outcome_name) > 25:
+                        outcome_name = outcome_name[:22] + "..."
+
+                    event_map[slug]["event_outcomes"].append({
+                        "name": outcome_name,
+                        "price": market["yes_price"],
+                    })
+
+            # Keep the highest YES price
+            if market["yes_price"] > event_map[slug]["yes_price"]:
+                event_map[slug]["yes_price"] = market["yes_price"]
+                event_map[slug]["outcomes"] = market.get("outcomes", [])
+
+    # Sort event_outcomes by price and set as primary outcomes for multi-outcome events
+    for slug, data in event_map.items():
+        if data.get("is_multi_outcome") and data.get("event_outcomes"):
+            data["event_outcomes"].sort(key=lambda x: x["price"], reverse=True)
+            data["outcomes"] = data["event_outcomes"][:10]
 
     unique_events = list(event_map.values())
     unique_events.sort(key=lambda x: x["total_volume"], reverse=True)
