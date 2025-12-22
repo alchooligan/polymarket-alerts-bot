@@ -30,6 +30,7 @@ from alerts import (
     filter_by_category,
     get_available_categories,
     _format_volume,
+    _format_odds,
     format_market_card,
 )
 
@@ -708,69 +709,69 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.message.reply_text(f"Finding new markets (last {time_label})...")
 
     try:
-        # Get recently seen slugs from database
-        recent = get_recently_seen_slugs(hours=hours)
-
-        if not recent:
-            await update.message.reply_text(
-                f"No new markets in the last {time_label}.\n"
-                "Run /checknow to scan for new ones."
-            )
-            return
-
-        # Get current market data for these slugs
-        events = await get_all_markets_paginated(target_count=500, include_spam=False)
+        # Get markets directly from API
+        events = await get_all_markets_paginated(target_count=1000, include_spam=False)
         events = filter_sports(events)
         events = filter_resolved(events)
 
-        # Build lookup
-        event_map = {e.get("slug"): e for e in events}
+        now = datetime.now(timezone.utc)
+        cutoff = now.timestamp() - (hours * 3600)
 
         # Get velocity data
         slugs = [e.get("slug") for e in events if e.get("slug")]
         deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
 
-        # Enrich recent markets with current data
+        # Filter to recently created markets using API created_at field
         new_markets = []
-        now = datetime.now(timezone.utc)
 
-        for r in recent:
-            slug = r.get("event_slug")
-            if slug in event_map:
-                event = event_map[slug]
-                total_volume = event.get("total_volume", 0)
+        for event in events:
+            created_at = event.get("created_at", "")
+            if not created_at:
+                continue
 
-                # Calculate hours since launch
-                first_seen = r.get("first_seen_at")
-                hours_ago = 0
-                if first_seen:
-                    try:
-                        if isinstance(first_seen, str):
-                            seen_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
-                        else:
-                            seen_dt = first_seen.replace(tzinfo=timezone.utc)
-                        hours_ago = (now - seen_dt).total_seconds() / 3600
-                    except:
-                        pass
+            # Parse creation time
+            try:
+                if isinstance(created_at, str):
+                    # Handle various date formats
+                    created_at = created_at.replace("Z", "+00:00")
+                    if "T" in created_at:
+                        created_dt = datetime.fromisoformat(created_at)
+                    else:
+                        created_dt = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S")
+                        created_dt = created_dt.replace(tzinfo=timezone.utc)
+                else:
+                    created_dt = created_at.replace(tzinfo=timezone.utc) if created_at.tzinfo is None else created_at
 
-                # Get velocity
-                velocity = deltas_1h.get(slug, 0)
-                velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
+                # Check if within time window
+                if created_dt.timestamp() < cutoff:
+                    continue
 
-                new_markets.append({
-                    "slug": slug,
-                    "title": event.get("title", r.get("title", "Unknown")),
-                    "total_volume": total_volume,
-                    "yes_price": event.get("yes_price", 0),
-                    "first_seen_at": first_seen,
-                    "hours_ago": hours_ago,
-                    "velocity": velocity,
-                    "velocity_pct": velocity_pct,
-                })
+                hours_ago = (now - created_dt).total_seconds() / 3600
+            except Exception:
+                continue
+
+            total_volume = event.get("total_volume", 0)
+            slug = event.get("slug", "")
+
+            # Get velocity
+            velocity = deltas_1h.get(slug, 0)
+            velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
+
+            new_markets.append({
+                "slug": slug,
+                "title": event.get("title", "Unknown"),
+                "total_volume": total_volume,
+                "yes_price": event.get("yes_price", 0),
+                "outcomes": event.get("outcomes", []),
+                "hours_ago": hours_ago,
+                "velocity": velocity,
+                "velocity_pct": velocity_pct,
+            })
 
         if not new_markets:
             await update.message.reply_text(
-                f"No new markets (non-sports) in the last {time_label}."
+                f"No new markets in the last {time_label}.\n"
+                "Try /new 48h for a wider window."
             )
             return
 
@@ -809,12 +810,15 @@ Sorted by volume — money flowing to fresh markets.
             else:
                 time_ago = f"{hours_ago:.0f}h ago"
 
+            # Format odds
+            odds_str = _format_odds(m)
+
             lines.append(f"━━━ {i} ━━━")
             lines.append(f"[{title}](https://polymarket.com/event/{slug})")
             lines.append("")
             lines.append(f"Launched: {time_ago}")
             lines.append(f"Volume: {vol_str} | Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
-            lines.append(f"Odds: YES at {yes_price:.0f}%")
+            lines.append(f"Odds: {odds_str}")
             lines.append("")
 
         if len(new_markets) > count:
@@ -1045,11 +1049,23 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if not movers:
             cat_msg = f" in {category}" if category else ""
-            await update.message.reply_text(
-                f"No movers{cat_msg} in last {time_label}.\n\n"
-                f"Movers require price move >={threshold}% in {time_label}.\n"
-                f"Try a longer window: /movers 24h"
-            )
+
+            # Check if we have price data at all
+            has_price_data = len(price_deltas) > 0
+
+            if not has_price_data:
+                await update.message.reply_text(
+                    f"No price history data for {time_label} window yet.\n\n"
+                    f"The bot needs to run for {hours}h to compare prices.\n"
+                    f"Run /checknow to trigger a scan and build history.\n"
+                    f"Try /hot instead - it works immediately."
+                )
+            else:
+                await update.message.reply_text(
+                    f"No significant movers{cat_msg} in last {time_label}.\n\n"
+                    f"Threshold: >={threshold}% price change.\n"
+                    f"Try: /movers 6h or /movers 24h"
+                )
             return
 
         # Enrich with data for format_market_card
