@@ -1930,6 +1930,7 @@ def format_bundled_new_launches(alerts: list[dict]) -> str:
 async def check_whale_trades(
     min_size: float = 50_000,
     limit: int = 100,
+    record: bool = True,
 ) -> list[dict]:
     """
     Check for large trades ($50K+) that we haven't alerted about.
@@ -1940,6 +1941,7 @@ async def check_whale_trades(
     Args:
         min_size: Minimum trade size in dollars
         limit: Number of recent trades to fetch
+        record: If True, record trades as seen (set False for testing)
 
     Returns:
         List of whale trades to alert about
@@ -1976,9 +1978,14 @@ async def check_whale_trades(
     if not large_trades:
         return []
 
-    # Get trade IDs and filter unseen
+    # Get trade IDs and filter unseen (skip filtering if not recording)
     trade_ids = [t.get("id") or t.get("trade_id") or str(hash(str(t))) for t in large_trades]
-    unseen_ids = set(get_unseen_trade_ids(trade_ids))
+
+    if record:
+        unseen_ids = set(get_unseen_trade_ids(trade_ids))
+    else:
+        # For testing, treat all as unseen
+        unseen_ids = set(trade_ids)
 
     # Filter to only unseen trades
     new_whale_trades = []
@@ -2029,8 +2036,8 @@ async def check_whale_trades(
 
         new_whale_trades.append(whale_trade)
 
-    # Record all whale trades we're about to alert
-    if new_whale_trades:
+    # Record all whale trades we're about to alert (unless testing)
+    if record and new_whale_trades:
         record_whale_trades_bulk(new_whale_trades)
 
     return new_whale_trades

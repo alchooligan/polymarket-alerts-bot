@@ -1773,8 +1773,8 @@ async def testwhale_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(f"Checking for trades >= ${min_size:,}...")
 
     try:
-        # Fetch trades with lower threshold for testing
-        trades = await check_whale_trades(min_size=min_size, limit=50)
+        # Fetch trades with lower threshold for testing (record=False to not mark as seen)
+        trades = await check_whale_trades(min_size=min_size, limit=100, record=False)
 
         if not trades:
             await update.message.reply_text(
@@ -1790,28 +1790,32 @@ async def testwhale_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Show what we found
         lines = [f"Found {len(trades)} trades >= ${min_size:,}:\n"]
 
-        for i, t in enumerate(trades[:5], 1):
+        for i, t in enumerate(trades[:10], 1):
             size = t.get("size", 0)
-            title = t.get("market_title", "Unknown")[:40]
+            title = t.get("market_title", "Unknown")[:35]
             side = t.get("side", "?")
             outcome = t.get("outcome", "?")
             price = t.get("price", 0)
+            slug = t.get("event_slug", "")
 
-            size_str = f"${size/1000:.0f}K" if size >= 1000 else f"${size:.0f}"
+            size_str = f"${size/1000:.1f}K" if size >= 1000 else f"${size:.0f}"
             lines.append(f"{i}. {size_str} {side} {outcome} @ {price:.0f}%")
             lines.append(f"   {title}")
+            if slug:
+                lines.append(f"   polymarket.com/event/{slug}")
             lines.append("")
 
-        if len(trades) > 5:
-            lines.append(f"+{len(trades) - 5} more trades")
+        if len(trades) > 10:
+            lines.append(f"+{len(trades) - 10} more trades")
 
-        # Show sample formatted alert
-        lines.append("\n--- Sample Alert Format ---")
-        lines.append(format_whale_alert(trades[0]))
+        # Show sample formatted alert (plain text, no markdown issues)
+        lines.append("\n--- Sample Alert ---")
+        sample = trades[0]
+        whale_emoji = "WHALE" if sample.get("is_mega") else "Whale"
+        lines.append(f"{whale_emoji}: {sample.get('market_title', 'Unknown')[:40]}")
+        lines.append(f"${sample.get('size', 0)/1000:.1f}K {sample.get('side', '?')} {sample.get('outcome', '?')} at {sample.get('price', 0):.0f}%")
 
-        await update.message.reply_text(
-            "\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True
-        )
+        await update.message.reply_text("\n".join(lines), disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Error in testwhale: {e}")
