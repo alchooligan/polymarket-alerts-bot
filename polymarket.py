@@ -97,7 +97,8 @@ async def fetch_events_paginated(
     """
     all_events = []
     offset = 0
-    max_pages = 10  # Safety limit: 10 pages * 100 = 1000 max events
+    # Calculate max pages needed, with a hard cap of 100 pages (10000 events)
+    max_pages = min((target_count // page_size) + 1, 100)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         for _ in range(max_pages):
