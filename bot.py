@@ -60,7 +60,7 @@ def format_new_page(markets: list, page: int, time_label: str, total_eligible: i
 
     header = f"""🆕 New Markets (last {time_label}) — Page {page + 1}/{total_pages}
 
-Sorted by volume — money flowing to fresh markets.
+Sorted by newest first.
 """
     lines = [header]
 
@@ -753,10 +753,12 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     """
     from datetime import datetime, timezone
 
-    # Parse time window and count from args
+    # Parse time window, category, and count from args
     hours = 24
     time_label = "24h"
     count = 15  # Default results
+    category = None
+    available_cats = get_available_categories()
 
     for arg in context.args:
         arg_lower = arg.lower()
@@ -778,10 +780,15 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         elif arg_lower in ["7d", "168h", "168"]:
             hours = 168
             time_label = "7d"
+        elif arg_lower in available_cats:
+            category = arg_lower
         elif arg.isdigit():
             count = min(int(arg), 50)
 
-    await update.message.reply_text(f"Finding new markets (last {time_label})...")
+    status_msg = f"Finding new markets (last {time_label})"
+    if category:
+        status_msg += f" [{category}]"
+    await update.message.reply_text(status_msg + "...")
 
     try:
         # Get ALL markets from API (Polymarket has ~2000-3000 active)
@@ -793,6 +800,10 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         events = filter_resolved(events_no_sports)
         resolved_filtered = len(events_no_sports) - len(events)
+
+        # Apply category filter if specified
+        if category:
+            events = filter_by_category(events, category)
 
         now = datetime.now(timezone.utc)
         cutoff = now.timestamp() - (hours * 3600)
@@ -881,8 +892,8 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 )
             return
 
-        # Sort by volume (highest first)
-        new_markets.sort(key=lambda x: x["total_volume"], reverse=True)
+        # Sort by newest first (lowest hours_ago = most recent)
+        new_markets.sort(key=lambda x: x["hours_ago"])
 
         # Store in pagination cache for this user
         user_id = update.effective_user.id
