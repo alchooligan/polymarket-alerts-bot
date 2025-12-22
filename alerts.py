@@ -675,6 +675,57 @@ def _escape_markdown(text: str) -> str:
     return text.replace("[", "\\[").replace("]", "\\]").replace("(", "\\(").replace(")", "\\)").replace("_", "\\_").replace("*", "\\*")
 
 
+def _format_odds(market: dict) -> str:
+    """
+    Format odds line based on market outcomes.
+
+    Binary markets (2 outcomes): "YES 26% · NO 74%"
+    Multi-outcome (3+): "Top: Elon Musk 51% · Tim Cook 23%"
+    Fallback: "YES at X%" if no outcomes data
+    """
+    outcomes = market.get("outcomes", [])
+    all_outcomes = market.get("all_outcomes", outcomes)  # Aggregated outcomes
+
+    # Use all_outcomes if available (more complete for multi-outcome)
+    if all_outcomes and len(all_outcomes) > len(outcomes):
+        outcomes = all_outcomes
+
+    # Sort by price descending
+    if outcomes:
+        outcomes = sorted(outcomes, key=lambda x: x.get("price", 0), reverse=True)
+
+    if not outcomes or len(outcomes) < 2:
+        # Fallback to yes_price
+        yes_price = market.get("yes_price", 50)
+        return f"YES at {yes_price:.0f}%"
+
+    if len(outcomes) == 2:
+        # Binary market - show YES X% · NO Y%
+        # Find Yes/No outcomes
+        yes_outcome = None
+        no_outcome = None
+        for o in outcomes:
+            name_lower = o.get("name", "").lower()
+            if name_lower in ["yes", "y"]:
+                yes_outcome = o
+            elif name_lower in ["no", "n"]:
+                no_outcome = o
+
+        if yes_outcome and no_outcome:
+            return f"YES {yes_outcome['price']:.0f}% · NO {no_outcome['price']:.0f}%"
+        else:
+            # Not standard yes/no, show as top 2
+            top1 = outcomes[0]
+            top2 = outcomes[1]
+            return f"{top1['name']} {top1['price']:.0f}% · {top2['name']} {top2['price']:.0f}%"
+
+    else:
+        # Multi-outcome (3+) - show top 2
+        top1 = outcomes[0]
+        top2 = outcomes[1]
+        return f"Top: {top1['name']} {top1['price']:.0f}% · {top2['name']} {top2['price']:.0f}%"
+
+
 def format_market_card(
     market: dict,
     style: str = "full",
@@ -817,8 +868,9 @@ def format_market_card(
     if context:
         lines.append(context)
 
-    # Odds line
-    lines.append(f"Odds: YES at {yes_price:.0f}%")
+    # Odds line - show actual outcomes
+    odds_str = _format_odds(market)
+    lines.append(f"Odds: {odds_str}")
 
     # Velocity line
     lines.append(f"Velocity: {vel_abs_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
@@ -826,8 +878,8 @@ def format_market_card(
     # Volume line
     lines.append(f"Volume: {vol_str} | 6h: {vol_6h_str}")
 
-    # Price line
-    lines.append(f"Price: {yes_price:.0f}% | 6h: {price_6h_str} | 24h: {price_24h_str}")
+    # Price change line (use yes_price as base for deltas)
+    lines.append(f"Price Δ: 6h {price_6h_str} | 24h {price_24h_str}")
 
     # Closes line (if available)
     if closes_str:
@@ -894,7 +946,6 @@ def format_bundled_milestones(milestones: list[dict]) -> str:
         title = _escape_markdown(m.get("title", "Unknown")[:45])
         threshold = m.get("threshold", 0)
         volume = m.get("current_volume", 0)
-        yes_price = m.get("yes_price", 0)
         slug = m.get("slug", "")
         velocity = m.get("velocity", 0)
         velocity_pct = m.get("velocity_pct", 0)
@@ -902,6 +953,7 @@ def format_bundled_milestones(milestones: list[dict]) -> str:
         threshold_str = _format_volume(threshold)
         volume_str = _format_volume(volume)
         vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+        odds_str = _format_odds(m)
 
         # Emoji for velocity
         vel_emoji = ""
@@ -912,7 +964,7 @@ def format_bundled_milestones(milestones: list[dict]) -> str:
 
         lines.append(f"[{title}](https://polymarket.com/event/{slug})")
         lines.append(f"Crossed {threshold_str} → Now {volume_str}")
-        lines.append(f"YES: {yes_price:.0f}% | {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
+        lines.append(f"{odds_str} | {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -928,13 +980,13 @@ def format_bundled_discoveries(discoveries: list[dict]) -> str:
     for d in discoveries:
         title = _escape_markdown(d.get("title", "Unknown")[:45])
         volume = d.get("current_volume", 0)
-        yes_price = d.get("yes_price", 0)
         slug = d.get("slug", "")
         velocity = d.get("velocity", 0)
         velocity_pct = d.get("velocity_pct", 0)
 
         volume_str = _format_volume(volume)
         vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+        odds_str = _format_odds(d)
 
         # Emoji for velocity
         vel_emoji = ""
@@ -944,7 +996,7 @@ def format_bundled_discoveries(discoveries: list[dict]) -> str:
             vel_emoji = " 🔥"
 
         lines.append(f"[{title}](https://polymarket.com/event/{slug})")
-        lines.append(f"Volume: {volume_str} | YES: {yes_price:.0f}%")
+        lines.append(f"Volume: {volume_str} | {odds_str}")
         lines.append(f"Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
         lines.append("")
 
@@ -1571,7 +1623,6 @@ def format_wakeup_alert(market: dict) -> str:
     """Format a wakeup alert for Telegram."""
     title = _escape_markdown(market.get("title", "Unknown")[:50])
     slug = market.get("slug", "")
-    yes_price = market.get("yes_price", 0)
     total_volume = market.get("total_volume", 0)
     velocity_past = market.get("velocity_past", 0)
     velocity_now = market.get("velocity_now", 0)
@@ -1580,6 +1631,7 @@ def format_wakeup_alert(market: dict) -> str:
     vol_str = _format_volume(total_volume)
     vel_past_str = f"<${velocity_past/1000:.0f}K/hr" if velocity_past >= 1000 else f"<${velocity_past:.0f}/hr"
     vel_now_str = f"+${velocity_now/1000:.0f}K/hr" if velocity_now >= 1000 else f"+${velocity_now:.0f}/hr"
+    odds_str = _format_odds(market)
 
     # Emoji
     vel_emoji = " 🔥🔥" if velocity_pct_now >= 20 else " 🔥"
@@ -1590,7 +1642,7 @@ def format_wakeup_alert(market: dict) -> str:
 
 Was quiet: {vel_past_str} for 6h
 Now hot: {vel_now_str} ({velocity_pct_now:.1f}%/hr){vel_emoji}
-Volume: {vol_str} | YES: {yes_price:.0f}%"""
+Volume: {vol_str} | {odds_str}"""
 
 
 def format_fast_mover_alert(market: dict) -> str:
@@ -1624,7 +1676,6 @@ def format_early_heat_alert(market: dict) -> str:
     """Format an early heat alert for Telegram."""
     title = _escape_markdown(market.get("title", "Unknown")[:50])
     slug = market.get("slug", "")
-    yes_price = market.get("yes_price", 0)
     total_volume = market.get("total_volume", 0)
     velocity = market.get("velocity", 0)
     velocity_pct = market.get("velocity_pct", 0)
@@ -1633,6 +1684,7 @@ def format_early_heat_alert(market: dict) -> str:
     vol_str = _format_volume(total_volume)
     vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
     time_ago = f"{hours_ago:.0f}h ago" if hours_ago >= 1 else f"{hours_ago*60:.0f}m ago"
+    odds_str = _format_odds(market)
 
     vel_emoji = " 🔥🔥" if velocity_pct >= 20 else " 🔥"
 
@@ -1642,21 +1694,21 @@ def format_early_heat_alert(market: dict) -> str:
 
 Launched: {time_ago}
 Volume: {vol_str} | Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}
-Odds: YES at {yes_price:.0f}%"""
+Odds: {odds_str}"""
 
 
 def format_new_launch_alert(market: dict) -> str:
     """Format a new launch alert for Telegram."""
     title = _escape_markdown(market.get("title", "Unknown")[:50])
     slug = market.get("slug", "")
-    yes_price = market.get("yes_price", 0)
+    odds_str = _format_odds(market)
 
     return f"""🆕 *New Market*
 
 [{title}](https://polymarket.com/event/{slug})
 
 Just launched
-Odds: YES at {yes_price:.0f}%"""
+Odds: {odds_str}"""
 
 
 def format_bundled_wakeups(alerts: list[dict]) -> str:
@@ -1672,15 +1724,15 @@ def format_bundled_wakeups(alerts: list[dict]) -> str:
         velocity_now = a.get("velocity_now", 0)
         velocity_pct_now = a.get("velocity_pct_now", 0)
         total_volume = a.get("total_volume", 0)
-        yes_price = a.get("yes_price", 0)
 
         vol_str = _format_volume(total_volume)
         vel_str = f"+${velocity_now/1000:.0f}K/hr" if velocity_now >= 1000 else f"+${velocity_now:.0f}/hr"
         vel_emoji = " 🔥🔥" if velocity_pct_now >= 20 else " 🔥"
+        odds_str = _format_odds(a)
 
         lines.append(f"[{title}](https://polymarket.com/event/{slug})")
         lines.append(f"Was quiet → Now: {vel_str} ({velocity_pct_now:.1f}%/hr){vel_emoji}")
-        lines.append(f"Volume: {vol_str} | YES: {yes_price:.0f}%")
+        lines.append(f"Volume: {vol_str} | {odds_str}")
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -1726,16 +1778,16 @@ def format_bundled_early_heat(alerts: list[dict]) -> str:
         velocity = a.get("velocity", 0)
         velocity_pct = a.get("velocity_pct", 0)
         hours_ago = a.get("hours_ago", 0)
-        yes_price = a.get("yes_price", 0)
 
         vol_str = _format_volume(total_volume)
         vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
         time_ago = f"{hours_ago:.0f}h ago" if hours_ago >= 1 else f"{hours_ago*60:.0f}m ago"
         vel_emoji = " 🔥🔥" if velocity_pct >= 20 else " 🔥"
+        odds_str = _format_odds(a)
 
         lines.append(f"[{title}](https://polymarket.com/event/{slug})")
         lines.append(f"Launched: {time_ago} | {vol_str}")
-        lines.append(f"Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji} | YES: {yes_price:.0f}%")
+        lines.append(f"Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji} | {odds_str}")
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -1751,10 +1803,10 @@ def format_bundled_new_launches(alerts: list[dict]) -> str:
     for a in alerts:
         title = _escape_markdown(a.get("title", "Unknown")[:40])
         slug = a.get("slug", "")
-        yes_price = a.get("yes_price", 0)
+        odds_str = _format_odds(a)
 
         lines.append(f"[{title}](https://polymarket.com/event/{slug})")
-        lines.append(f"Just launched | YES: {yes_price:.0f}%")
+        lines.append(f"Just launched | {odds_str}")
         lines.append("")
 
     return "\n".join(lines).strip()

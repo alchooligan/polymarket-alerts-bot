@@ -226,6 +226,50 @@ def parse_outcome_prices(outcome_prices_str: str) -> dict[str, float]:
     return {"yes": 0.0, "no": 0.0}
 
 
+def parse_outcomes_with_names(market: dict) -> list[dict]:
+    """
+    Parse outcomes with their names and prices.
+
+    Args:
+        market: Market dictionary from API
+
+    Returns:
+        List of outcome dicts: [{"name": "Yes", "price": 65.0}, ...]
+        Sorted by price descending (highest first)
+    """
+    outcomes = []
+
+    # Get outcome names - could be in 'outcomes' field as JSON string or list
+    outcome_names = market.get("outcomes", [])
+    if isinstance(outcome_names, str):
+        try:
+            outcome_names = json.loads(outcome_names)
+        except json.JSONDecodeError:
+            outcome_names = ["Yes", "No"]
+
+    # Get outcome prices
+    outcome_prices_str = market.get("outcomePrices", "[]")
+    try:
+        outcome_prices = json.loads(outcome_prices_str)
+    except json.JSONDecodeError:
+        outcome_prices = []
+
+    # Combine names and prices
+    for i, name in enumerate(outcome_names):
+        price = 0.0
+        if i < len(outcome_prices):
+            try:
+                price = float(outcome_prices[i]) * 100  # Convert to percentage
+            except (ValueError, TypeError):
+                pass
+        outcomes.append({"name": name, "price": price})
+
+    # Sort by price descending (top outcomes first)
+    outcomes.sort(key=lambda x: x["price"], reverse=True)
+
+    return outcomes
+
+
 def is_price_spam(title: str) -> bool:
     """
     Check if a market title looks like crypto price prediction spam.
@@ -318,6 +362,9 @@ def extract_market_info(event: dict) -> list[dict]:
             created_at
         )
 
+        # Parse full outcomes with names
+        outcomes = parse_outcomes_with_names(market)
+
         market_info = {
             "id": market.get("id", ""),
             "event_id": event.get("id", ""),
@@ -326,6 +373,7 @@ def extract_market_info(event: dict) -> list[dict]:
             "question": market.get("question", event_title),
             "yes_price": prices["yes"],
             "no_price": prices["no"],
+            "outcomes": outcomes,  # Full outcomes with names
             "volume": float(market.get("volume", 0) or 0),
             "liquidity": float(market.get("liquidity", 0) or 0),
             "end_date": market.get("endDate", ""),
@@ -399,13 +447,24 @@ async def get_unique_events(limit: int = 100, include_spam: bool = False) -> lis
                     "total_volume": market["volume"],
                     "tags": market["tags"],
                     "end_date": market["end_date"],
+                    "outcomes": market.get("outcomes", []),
+                    "all_outcomes": list(market.get("outcomes", [])),
                 }
             else:
                 # Add volume from additional markets in same event
                 event_map[slug]["total_volume"] += market["volume"]
+                # Aggregate outcomes
+                for outcome in market.get("outcomes", []):
+                    existing = next((o for o in event_map[slug]["all_outcomes"] if o["name"] == outcome["name"]), None)
+                    if existing:
+                        if outcome["price"] > existing["price"]:
+                            existing["price"] = outcome["price"]
+                    else:
+                        event_map[slug]["all_outcomes"].append(outcome)
                 # Keep the highest YES price (most interesting outcome)
                 if market["yes_price"] > event_map[slug]["yes_price"]:
                     event_map[slug]["yes_price"] = market["yes_price"]
+                    event_map[slug]["outcomes"] = market.get("outcomes", [])
 
     # Convert to list and sort by volume descending
     unique_events = list(event_map.values())
@@ -450,11 +509,22 @@ async def get_popular_markets(limit: int = 100, include_spam: bool = False) -> l
                     "total_volume": market["volume"],
                     "tags": market["tags"],
                     "end_date": market["end_date"],
+                    "outcomes": market.get("outcomes", []),
+                    "all_outcomes": list(market.get("outcomes", [])),
                 }
             else:
                 event_map[slug]["total_volume"] += market["volume"]
+                # Aggregate outcomes
+                for outcome in market.get("outcomes", []):
+                    existing = next((o for o in event_map[slug]["all_outcomes"] if o["name"] == outcome["name"]), None)
+                    if existing:
+                        if outcome["price"] > existing["price"]:
+                            existing["price"] = outcome["price"]
+                    else:
+                        event_map[slug]["all_outcomes"].append(outcome)
                 if market["yes_price"] > event_map[slug]["yes_price"]:
                     event_map[slug]["yes_price"] = market["yes_price"]
+                    event_map[slug]["outcomes"] = market.get("outcomes", [])
 
     # Convert to list (already sorted by volume from API, but re-sort to be safe)
     unique_events = list(event_map.values())
@@ -505,12 +575,26 @@ async def get_all_markets_paginated(
                     "total_volume": market["volume"],
                     "tags": market["tags"],
                     "end_date": market["end_date"],
-                    "created_at": market.get("created_at", ""),  # Pass through creation date
+                    "created_at": market.get("created_at", ""),
+                    "outcomes": market.get("outcomes", []),  # Store outcomes
+                    "all_outcomes": list(market.get("outcomes", [])),  # Collect all outcomes across markets
                 }
             else:
                 event_map[slug]["total_volume"] += market["volume"]
+                # Add outcomes from this market to the all_outcomes list
+                for outcome in market.get("outcomes", []):
+                    # Check if this outcome name already exists
+                    existing = next((o for o in event_map[slug]["all_outcomes"] if o["name"] == outcome["name"]), None)
+                    if existing:
+                        # Update price if higher
+                        if outcome["price"] > existing["price"]:
+                            existing["price"] = outcome["price"]
+                    else:
+                        event_map[slug]["all_outcomes"].append(outcome)
+                # Keep the highest YES price
                 if market["yes_price"] > event_map[slug]["yes_price"]:
                     event_map[slug]["yes_price"] = market["yes_price"]
+                    event_map[slug]["outcomes"] = market.get("outcomes", [])
 
     unique_events = list(event_map.values())
     unique_events.sort(key=lambda x: x["total_volume"], reverse=True)
