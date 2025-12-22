@@ -1934,6 +1934,9 @@ async def check_whale_trades(
     """
     Check for large trades ($50K+) that we haven't alerted about.
 
+    The Polymarket Data API returns trades with title, slug, eventSlug, outcome
+    directly on each trade - no separate market lookup needed.
+
     Args:
         min_size: Minimum trade size in dollars
         limit: Number of recent trades to fetch
@@ -1941,7 +1944,7 @@ async def check_whale_trades(
     Returns:
         List of whale trades to alert about
     """
-    from polymarket import fetch_recent_trades, fetch_market_by_asset
+    from polymarket import fetch_recent_trades
     from database import get_unseen_trade_ids, record_whale_trades_bulk
     from config import WHALE_TRADE_MIN, WHALE_TRADE_MEGA
 
@@ -1984,41 +1987,27 @@ async def check_whale_trades(
         if trade_id not in unseen_ids:
             continue
 
-        # Get market info for this trade
-        asset_id = t.get("asset") or t.get("asset_id") or t.get("token_id")
-        market_info = None
-        if asset_id:
-            market_info = await fetch_market_by_asset(asset_id)
-
-        # Build whale trade record
+        # Build whale trade record - Data API includes title/slug/outcome directly!
         size = float(t.get("size", 0) or t.get("amount", 0))
         price = float(t.get("price", 0)) * 100 if t.get("price") else 0
 
-        # Determine side and outcome
-        side = t.get("side", "").upper()
+        # Get market info directly from trade (Data API includes these)
+        market_title = t.get("title", "")
+        event_slug = t.get("eventSlug", "") or t.get("slug", "")
         outcome = t.get("outcome", "")
+
+        # Fallback for outcome
         if not outcome:
-            # Try to infer from outcome_index
             outcome_idx = t.get("outcome_index", t.get("outcomeIndex"))
             if outcome_idx is not None:
                 outcome = "YES" if str(outcome_idx) == "0" else "NO"
 
-        # Get event slug and title
-        event_slug = ""
-        market_title = ""
-        total_volume = 0
+        # Get side
+        side = t.get("side", "").upper()
 
-        if market_info:
-            event_slug = market_info.get("slug", "")
-            market_title = market_info.get("question", "") or market_info.get("title", "")
-            total_volume = float(market_info.get("volume", 0) or 0)
-
-            # Check if sports/spam
-            if is_sports_market({"slug": event_slug, "title": market_title}):
-                continue
-
-        # Calculate trade as % of volume
-        pct_of_volume = (size / total_volume * 100) if total_volume > 0 else 0
+        # Skip sports/spam markets
+        if market_title and is_sports_market({"slug": event_slug, "title": market_title}):
+            continue
 
         # Is this mega whale?
         is_mega = size >= WHALE_TRADE_MEGA
@@ -2026,14 +2015,14 @@ async def check_whale_trades(
         whale_trade = {
             "trade_id": trade_id,
             "event_slug": event_slug,
-            "asset_id": asset_id,
+            "asset_id": t.get("asset") or t.get("asset_id") or t.get("token_id", ""),
             "size": size,
             "price": price,
             "side": side,
             "outcome": outcome,
             "market_title": market_title,
-            "total_volume": total_volume,
-            "pct_of_volume": pct_of_volume,
+            "total_volume": 0,  # Not available from trades endpoint
+            "pct_of_volume": 0,  # Can't calculate without volume
             "is_mega": is_mega,
             "trade_timestamp": t.get("timestamp", ""),
         }
