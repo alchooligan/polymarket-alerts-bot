@@ -49,34 +49,34 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     welcome_message = """👋 Welcome to PolySniffer
 
-I find Polymarket opportunities before they're obvious.
+I find Polymarket alpha before it's obvious.
 
-━━━ COMMANDS ━━━
+━━━ PRIMARY COMMANDS ━━━
 
-/discover — Markets gaining momentum
-/hot — Fastest money flow (% of market)
-/top — Most volume added ($)
-/movers — Biggest price changes
-/underdogs — Low odds with money coming in
+/discover — Markets waking up (momentum)
+/hot — Where money flows (velocity %/hr)
+/movers — Biggest price moves
+/new — Recently launched markets
 
-Add time: /hot 1h, /top 6h, /movers 24h
-Add category: /discover crypto, /hot politics
+Time + count: /hot 6h 20, /movers 1h 15
+Category: /discover crypto, /hot politics
 
-━━━ ALERTS ━━━
+━━━ AUTOMATIC ALERTS ━━━
 
-I send you automatic alerts when:
-• A market crosses $100K, $500K, or $1M volume
-• A new market launches with real traction ($25K+)
-• A market is closing soon and has active betting
+⚡ *Wakeup* — Market was quiet, now hot
+📈 *Fast Mover* — 10%+ price move with volume
+🌱 *Early Heat* — New market gaining traction
+🆕 *New Launch* — Brand new markets
+📊 *Watchlist* — Your tracked markets move
 
-/settings — Turn alerts on/off
-/watch [market] — Track a specific market
+/settings — Toggle alerts
+/watch [market] — Track a market
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
 Type /how for the full guide
 
-Sports markets excluded."""
+Sports + near-resolved markets filtered."""
 
     await update.message.reply_text(welcome_message)
 
@@ -87,85 +87,73 @@ async def how_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-🎯 CORE COMMANDS (use these daily)
+🎯 PRIMARY COMMANDS
 
-/discover [category]
-Your main tool. Shows small markets waking up.
-Sorted by momentum: velocity + volume growth + price change.
-→ Try: /discover crypto
+/discover [time] [category] [count]
+Markets gaining momentum. Sorted by velocity + volume growth + price change.
+→ /discover crypto, /discover 6h 20
 
-/hot [time] [category]
-Where money is flowing RIGHT NOW.
-Sorted by velocity %/hr — highlights fast movers, not just big markets.
-→ Try: /hot 1h, /hot 6h crypto, /hot 24h politics
+/hot [time] [category] [count]
+Where money flows NOW. Sorted by velocity %/hr.
+→ /hot 1h, /hot 6h crypto 30
 
-/movers [category]
-Biggest price swings in last 24h.
-Opinion changed = something happened.
-→ Try: /movers, /movers politics
+/movers [time] [category] [count]
+Biggest price changes. Opinion shifted = something happened.
+→ /movers 1h, /movers 6h 20
 
-━━━━━━━━━━━━━━━━━━━━━━━━
-
-📋 UTILITY COMMANDS
+/new [time] [count]
+Newly launched markets sorted by volume.
+→ /new 6h, /new 24h 25
 
 /digest
 Consolidated summary — less spam, same signal.
 
-/new [time]
-Recently created markets.
-→ Try: /new, /new 48h
-
-/quiet [category]
-Big markets with low activity. Sleeping giants.
-→ Try: /quiet politics
-
-/underdogs
-Long shots (YES <20%) with rising prices.
-Contrarian money moving.
-
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-🔔 AUTOMATIC ALERTS
+🔔 AUTOMATIC ALERTS (V2)
 
-Volume Milestones
-→ Market crosses $100K, $250K, $500K, or $1M
-→ You get each milestone once per market
+⚡ Wakeup
+→ Market was quiet (<2%/hr), now hot (>10%/hr)
+→ Catches breaking news
 
-New Discoveries
-→ Market created in last 48h with $25K+ already
-→ Catches "launched big" moments
+📈 Fast Mover
+→ Price moved 10%+ in 2h with $10K+ volume behind
+→ Informed money moving prices
 
-Closing Soon
-→ Market ends in <12h with $5K+/hr action
-→ Last-minute money often = someone knows something
+🌱 Early Heat
+→ New market (<24h) with >15%/hr velocity
+→ Catches markets launching with traction
 
-Watchlist
+🆕 New Launch
+→ Brand new markets (<1h old)
+→ Be first to see new opportunities
+
+📊 Watchlist
 → Your tracked markets move 5%+
-→ Add with: /watch <slug>
+→ /watch <slug> to add
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-🏷️ CATEGORY FILTERS
+🏷️ FILTERS
 
-Add to any command:
-crypto, politics, tech, econ, world, entertainment
+Time: 1h, 6h, 24h
+Category: crypto, politics, tech, econ, world
+Count: 10-50 (default 10)
 
-Examples: /discover crypto, /hot politics
+Examples: /hot 1h crypto 20, /movers 6h 30
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
 📊 READING THE DATA
 
-Velocity %/hr = money flow relative to market size
-→ 8%/hr on $100K market = heating fast
-→ 0.1%/hr on $50M market = normal flow
+Velocity %/hr = money flow / market size
+→ 10%/hr = market could double in 10h
+→ 1%/hr = slow, steady accumulation
 
-Emojis:
-🔥 = velocity >10%/hr (heating up)
-🔥🔥 = velocity >20%/hr (on fire)
-🚀 = price up >15%
-💀 = price down >15%
-⬆️⬇️ = smaller price moves
+🔥 = >10%/hr (heating up)
+🔥🔥 = >20%/hr (on fire)
+🚀 = price +15%
+💀 = price -15%
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -174,16 +162,25 @@ Emojis:
 /settings — Toggle alert types
 /watch <slug> — Add to watchlist
 /watchlist — See tracked markets
+/top — Volume leaders ($ added)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-💡 TIP
+📦 LEGACY COMMANDS
 
-Start with /discover daily.
-Check /hot when news breaks.
-Use /digest for less noise.
+/quiet — Sleeping giants (low activity)
+/underdogs — Long shots rising
 
-Sports and resolved markets (95%+, 5%-) are filtered out."""
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 TIPS
+
+• /discover for daily alpha hunting
+• /hot 1h when news breaks
+• /movers 6h to see what moved
+• /new 24h for fresh opportunities
+
+Sports + resolved (95%+) markets filtered."""
 
     await update.message.reply_text(msg)
 
@@ -191,17 +188,19 @@ Sports and resolved markets (95%+, 5%-) are filtered out."""
 async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle the /discover command - show markets that are waking up with rich data.
-    Usage: /discover [category]
+    Usage: /discover [category] [count]
     Categories: crypto, politics, tech, econ, entertainment, world
     """
-    # Parse category from args
+    # Parse category and count from args
     category = None
+    count = 8  # Default results
     available_cats = get_available_categories()
 
     for arg in context.args:
         if arg.lower() in available_cats:
             category = arg.lower()
-            break
+        elif arg.isdigit():
+            count = min(int(arg), 50)  # Cap at 50
 
     status_msg = "Finding markets waking up"
     if category:
@@ -321,16 +320,16 @@ Momentum = velocity % + volume growth % + price change.
 
         # Format using market cards
         lines = [header]
-        for i, m in enumerate(markets_with_delta[:8], 1):
+        for i, m in enumerate(markets_with_delta[:count], 1):
             lines.append(f"━━━ {i} ━━━")
             lines.append(format_market_card(m, style="full"))
             lines.append("")
 
-        if len(markets_with_delta) > 8:
-            lines.append(f"+{len(markets_with_delta) - 8} more. Use /hot for velocity focus.")
+        if len(markets_with_delta) > count:
+            lines.append(f"+{len(markets_with_delta) - count} more. Use /hot for velocity focus.")
 
         response = "\n".join(lines).strip()
-        await update.message.reply_text(response, disable_web_page_preview=True)
+        await update.message.reply_text(response, parse_mode="Markdown", disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Error in discover: {e}")
@@ -341,7 +340,15 @@ async def underdogs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     """
     Handle the /underdogs command - show contrarian plays.
     Markets with YES <20% where price is actually rising (someone betting against consensus).
+    Usage: /underdogs [count]
     """
+    # Parse count from args
+    count = 8  # Default results
+    for arg in context.args:
+        if arg.isdigit():
+            count = min(int(arg), 50)
+            break
+
     await update.message.reply_text("Finding underdogs with rising prices...")
 
     try:
@@ -372,19 +379,19 @@ Contrarian money moving the needle.
 """
         lines = [header]
 
-        for i, m in enumerate(underdogs[:8], 1):
+        for i, m in enumerate(underdogs[:count], 1):
             price_change = m.get("price_change", 0)
             old_price = m.get("old_price", 0)
-            context = f"⬆️ Price: {old_price:.0f}% → {m['yes_price']:.0f}% (+{price_change:.0f}% in 24h)"
+            ctx = f"⬆️ Price: {old_price:.0f}% → {m['yes_price']:.0f}% (+{price_change:.0f}% in 24h)"
             lines.append(f"━━━ {i} ━━━")
-            lines.append(format_market_card(m, style="full", context=context))
+            lines.append(format_market_card(m, style="full", context=ctx))
             lines.append("")
 
-        if len(underdogs) > 8:
-            lines.append(f"+{len(underdogs) - 8} more underdogs rising.")
+        if len(underdogs) > count:
+            lines.append(f"+{len(underdogs) - count} more underdogs rising.")
 
         message = "\n".join(lines).strip()
-        await update.message.reply_text(message, disable_web_page_preview=True)
+        await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Error in underdogs: {e}")
@@ -394,13 +401,14 @@ Contrarian money moving the needle.
 async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle the /hot command - show markets by velocity with rich data.
-    Usage: /hot [1h|6h|24h] [category] - defaults to 1h, no filter
+    Usage: /hot [1h|6h|24h] [category] [count] - defaults to 1h, no filter, 10 results
     Categories: crypto, politics, tech, econ, entertainment, world
     """
-    # Parse time window and category from args
+    # Parse time window, category, and count from args
     hours = 1
     time_label = "1h"
     category = None
+    count = 10  # Default results
 
     available_cats = get_available_categories()
 
@@ -414,6 +422,8 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             time_label = "24h"
         elif arg_lower in available_cats:
             category = arg_lower
+        elif arg.isdigit():
+            count = min(int(arg), 50)  # Cap at 50
 
     status_msg = f"Finding hottest markets ({time_label})"
     if category:
@@ -441,8 +451,15 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Get volume deltas for specified time window
         deltas = get_volume_deltas_bulk(slugs, hours=hours)
 
+        # Always get 6h volume deltas for card display
+        deltas_6h = get_volume_deltas_bulk(slugs, hours=6) if hours != 6 else deltas
+
         # Get price deltas for the same window
         price_deltas = get_price_deltas_bulk(slugs, hours=hours)
+
+        # Always get 6h/24h price deltas for card display
+        price_deltas_6h = get_price_deltas_bulk(slugs, hours=6) if hours != 6 else price_deltas
+        price_deltas_24h = get_price_deltas_bulk(slugs, hours=24) if hours != 24 else price_deltas
 
         if not deltas:
             await update.message.reply_text(
@@ -486,10 +503,21 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         # Enrich with velocity data for format_market_card
         for m in hot_markets:
+            slug = m.get("slug")
+            total_volume = m.get("total_volume", 0)
             m["velocity"] = m.get("velocity_per_hour", 0)
-            price_data = m.get("price_data", {})
-            m["price_change_6h"] = price_data.get("delta", 0) if hours <= 6 else 0
-            m["price_change_24h"] = price_data.get("delta", 0) if hours > 6 else 0
+
+            # 6h volume data
+            delta_6h = deltas_6h.get(slug, 0)
+            m["delta_6h"] = delta_6h
+            vol_6h_ago = total_volume - delta_6h
+            m["volume_growth_pct"] = (delta_6h / vol_6h_ago * 100) if vol_6h_ago > 0 else 0
+
+            # Price data for 6h and 24h
+            price_data_6h = price_deltas_6h.get(slug, {})
+            price_data_24h = price_deltas_24h.get(slug, {})
+            m["price_change_6h"] = price_data_6h.get("delta", 0)
+            m["price_change_24h"] = price_data_24h.get("delta", 0)
 
         # Format header with explanation
         cat_label = f" [{category}]" if category else ""
@@ -501,16 +529,16 @@ Sorted by velocity %/hr — fast movers, not just big markets.
 
         # Format using market cards
         lines = [header]
-        for i, m in enumerate(hot_markets[:10], 1):
+        for i, m in enumerate(hot_markets[:count], 1):
             lines.append(f"━━━ {i} ━━━")
             lines.append(format_market_card(m, style="full"))
             lines.append("")
 
-        if len(hot_markets) > 10:
-            lines.append(f"+{len(hot_markets) - 10} more with positive velocity.")
+        if len(hot_markets) > count:
+            lines.append(f"+{len(hot_markets) - count} more with positive velocity.")
 
         message = "\n".join(lines).strip()
-        await update.message.reply_text(message, disable_web_page_preview=True)
+        await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Error in hot: {e}")
@@ -520,12 +548,13 @@ Sorted by velocity %/hr — fast movers, not just big markets.
 async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle the /top command - show markets by absolute volume added.
-    Usage: /top [1h|6h|24h] [category] - defaults to 1h
+    Usage: /top [1h|6h|24h] [category] [count] - defaults to 1h
     Unlike /hot (velocity %), this shows raw dollars flowing in.
     """
     hours = 1
     time_label = "1h"
     category = None
+    count = 10  # Default results
 
     available_cats = get_available_categories()
 
@@ -539,6 +568,8 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             time_label = "24h"
         elif arg_lower in available_cats:
             category = arg_lower
+        elif arg.isdigit():
+            count = min(int(arg), 50)  # Cap at 50
 
     status_msg = f"Finding top volume gainers ({time_label})"
     if category:
@@ -560,7 +591,10 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         slugs = [e.get("slug") for e in events if e.get("slug")]
         deltas = get_volume_deltas_bulk(slugs, hours=hours)
+        deltas_6h = get_volume_deltas_bulk(slugs, hours=6) if hours != 6 else deltas
         price_deltas = get_price_deltas_bulk(slugs, hours=hours)
+        price_deltas_6h = get_price_deltas_bulk(slugs, hours=6) if hours != 6 else price_deltas
+        price_deltas_24h = get_price_deltas_bulk(slugs, hours=24) if hours != 24 else price_deltas
 
         if not deltas:
             await update.message.reply_text(
@@ -597,9 +631,20 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
         # Enrich for format_market_card
         for m in top_markets:
-            price_data = m.get("price_data", {})
-            m["price_change_6h"] = price_data.get("delta", 0) if hours <= 6 else 0
-            m["price_change_24h"] = price_data.get("delta", 0) if hours > 6 else 0
+            slug = m.get("slug")
+            total_volume = m.get("total_volume", 0)
+
+            # 6h volume data
+            delta_6h = deltas_6h.get(slug, 0)
+            m["delta_6h"] = delta_6h
+            vol_6h_ago = total_volume - delta_6h
+            m["volume_growth_pct"] = (delta_6h / vol_6h_ago * 100) if vol_6h_ago > 0 else 0
+
+            # Price data
+            price_data_6h = price_deltas_6h.get(slug, {})
+            price_data_24h = price_deltas_24h.get(slug, {})
+            m["price_change_6h"] = price_data_6h.get("delta", 0)
+            m["price_change_24h"] = price_data_24h.get("delta", 0)
 
         cat_label = f" [{category}]" if category else ""
         header = f"""💰 Top Volume ({time_label}){cat_label}
@@ -609,18 +654,18 @@ Sorted by absolute $ added, not velocity %.
 """
 
         lines = [header]
-        for i, m in enumerate(top_markets[:10], 1):
+        for i, m in enumerate(top_markets[:count], 1):
             vol_added = m["volume_added"]
             vol_str = f"+${vol_added/1000:.0f}K" if vol_added >= 1000 else f"+${vol_added:.0f}"
             lines.append(f"━━━ {i}. {vol_str} ━━━")
             lines.append(format_market_card(m, style="full"))
             lines.append("")
 
-        if len(top_markets) > 10:
-            lines.append(f"+{len(top_markets) - 10} more with volume growth.")
+        if len(top_markets) > count:
+            lines.append(f"+{len(top_markets) - count} more with volume growth.")
 
         message = "\n".join(lines).strip()
-        await update.message.reply_text(message, disable_web_page_preview=True)
+        await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Error in top: {e}")
@@ -629,18 +674,36 @@ Sorted by absolute $ added, not velocity %.
 
 async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
-    Handle the /new command - show markets first seen recently.
-    Usage: /new [24h|48h] - defaults to 24h
+    Handle the /new command - show newly launched markets.
+    Usage: /new [1h|6h|12h|24h] [count] - defaults to 24h, 15 results
+    Sorted by volume - money flowing to fresh markets.
     """
-    # Parse time window from args
+    from datetime import datetime, timezone
+
+    # Parse time window and count from args
     hours = 24
     time_label = "24h"
+    count = 15  # Default results
 
-    if context.args:
-        arg = context.args[0].lower()
-        if arg in ["48h", "48"]:
+    for arg in context.args:
+        arg_lower = arg.lower()
+        if arg_lower in ["1h", "1"]:
+            hours = 1
+            time_label = "1h"
+        elif arg_lower in ["6h", "6"]:
+            hours = 6
+            time_label = "6h"
+        elif arg_lower in ["12h", "12"]:
+            hours = 12
+            time_label = "12h"
+        elif arg_lower in ["24h", "24"]:
+            hours = 24
+            time_label = "24h"
+        elif arg_lower in ["48h", "48"]:
             hours = 48
             time_label = "48h"
+        elif arg.isdigit():
+            count = min(int(arg), 50)
 
     await update.message.reply_text(f"Finding new markets (last {time_label})...")
 
@@ -663,18 +726,46 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Build lookup
         event_map = {e.get("slug"): e for e in events}
 
+        # Get velocity data
+        slugs = [e.get("slug") for e in events if e.get("slug")]
+        deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
+
         # Enrich recent markets with current data
         new_markets = []
+        now = datetime.now(timezone.utc)
+
         for r in recent:
             slug = r.get("event_slug")
             if slug in event_map:
                 event = event_map[slug]
+                total_volume = event.get("total_volume", 0)
+
+                # Calculate hours since launch
+                first_seen = r.get("first_seen_at")
+                hours_ago = 0
+                if first_seen:
+                    try:
+                        if isinstance(first_seen, str):
+                            seen_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+                        else:
+                            seen_dt = first_seen.replace(tzinfo=timezone.utc)
+                        hours_ago = (now - seen_dt).total_seconds() / 3600
+                    except:
+                        pass
+
+                # Get velocity
+                velocity = deltas_1h.get(slug, 0)
+                velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
+
                 new_markets.append({
                     "slug": slug,
                     "title": event.get("title", r.get("title", "Unknown")),
-                    "total_volume": event.get("total_volume", 0),
+                    "total_volume": total_volume,
                     "yes_price": event.get("yes_price", 0),
-                    "first_seen_at": r.get("first_seen_at"),
+                    "first_seen_at": first_seen,
+                    "hours_ago": hours_ago,
+                    "velocity": velocity,
+                    "velocity_pct": velocity_pct,
                 })
 
         if not new_markets:
@@ -689,29 +780,50 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         # Format with explanation
         header = f"""🆕 New Markets (last {time_label})
 
-Recently created markets, sorted by volume.
-Use /discover for markets with momentum.
+Sorted by volume — money flowing to fresh markets.
 """
         lines = [header]
 
-        for i, m in enumerate(new_markets[:15], 1):
-            title = m.get("title", "Unknown")[:45]
+        for i, m in enumerate(new_markets[:count], 1):
+            title = _escape_markdown(m.get("title", "Unknown")[:50])
             total_volume = m.get("total_volume", 0)
             yes_price = m.get("yes_price", 0)
             slug = m.get("slug", "")
+            hours_ago = m.get("hours_ago", 0)
+            velocity = m.get("velocity", 0)
+            velocity_pct = m.get("velocity_pct", 0)
 
             vol_str = _format_volume(total_volume)
+            vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
 
-            lines.append(f"{i}. {title}")
-            lines.append(f"   Odds: YES at {yes_price:.0f}% | Volume: {vol_str}")
-            lines.append(f"   polymarket.com/event/{slug}")
+            # Velocity emoji
+            vel_emoji = ""
+            if velocity_pct >= 20:
+                vel_emoji = " 🔥🔥"
+            elif velocity_pct >= 10:
+                vel_emoji = " 🔥"
+
+            # Time ago string
+            if hours_ago < 1:
+                time_ago = f"{hours_ago*60:.0f}m ago"
+            else:
+                time_ago = f"{hours_ago:.0f}h ago"
+
+            lines.append(f"━━━ {i} ━━━")
+            lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+            lines.append("")
+            lines.append(f"Launched: {time_ago}")
+            lines.append(f"Volume: {vol_str} | Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
+            lines.append(f"Odds: YES at {yes_price:.0f}%")
             lines.append("")
 
-        if len(new_markets) > 15:
-            lines.append(f"+{len(new_markets) - 15} more new markets")
+        if len(new_markets) > count:
+            lines.append(f"+{len(new_markets) - count} more new markets")
+
+        lines.append(f"\n{len(new_markets)} new markets in last {time_label}.")
 
         message = "\n".join(lines).strip()
-        await update.message.reply_text(message, disable_web_page_preview=True)
+        await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Error in new: {e}")
@@ -722,16 +834,18 @@ async def quiet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """
     Handle the /quiet command - find sleeping giants.
     Big markets ($100K+) with low activity that could wake up.
-    Usage: /quiet [category]
+    Usage: /quiet [category] [count]
     """
-    # Parse category from args
+    # Parse category and count from args
     category = None
+    count = 8  # Default results
     available_cats = get_available_categories()
 
     for arg in context.args:
         if arg.lower() in available_cats:
             category = arg.lower()
-            break
+        elif arg.isdigit():
+            count = min(int(arg), 50)  # Cap at 50
 
     status_msg = "Finding sleeping giants"
     if category:
@@ -820,17 +934,17 @@ Could wake up anytime with the right catalyst.
 """
         lines = [header]
 
-        for i, m in enumerate(sleeping_giants[:8], 1):
-            context = f"💤 Activity: {m['velocity_pct']:.2f}%/hr — sleeping"
+        for i, m in enumerate(sleeping_giants[:count], 1):
+            ctx = f"💤 Activity: {m['velocity_pct']:.2f}%/hr — sleeping"
             lines.append(f"━━━ {i} ━━━")
-            lines.append(format_market_card(m, style="full", context=context))
+            lines.append(format_market_card(m, style="full", context=ctx))
             lines.append("")
 
-        if len(sleeping_giants) > 8:
-            lines.append(f"+{len(sleeping_giants) - 8} more sleeping giants.")
+        if len(sleeping_giants) > count:
+            lines.append(f"+{len(sleeping_giants) - count} more sleeping giants.")
 
         message = "\n".join(lines).strip()
-        await update.message.reply_text(message, disable_web_page_preview=True)
+        await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Error in quiet: {e}")
@@ -840,19 +954,38 @@ Could wake up anytime with the right catalyst.
 async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """
     Handle the /movers command - find biggest price swings.
-    Markets with the largest price changes in last 24h.
-    Usage: /movers [category]
+    Usage: /movers [1h|6h|24h] [category] [count]
+    Categories: crypto, politics, tech, econ, entertainment, world
     """
-    # Parse category from args
+    # Parse time window, category, and count from args
+    hours = 24
+    time_label = "24h"
     category = None
+    count = 10  # Default results
+
     available_cats = get_available_categories()
 
     for arg in context.args:
-        if arg.lower() in available_cats:
-            category = arg.lower()
-            break
+        arg_lower = arg.lower()
+        if arg_lower in ["1h", "1"]:
+            hours = 1
+            time_label = "1h"
+        elif arg_lower in ["6h", "6"]:
+            hours = 6
+            time_label = "6h"
+        elif arg_lower in ["24h", "24"]:
+            hours = 24
+            time_label = "24h"
+        elif arg_lower in available_cats:
+            category = arg_lower
+        elif arg.isdigit():
+            count = min(int(arg), 50)  # Cap at 50
 
-    status_msg = "Finding biggest movers"
+    # Adjust threshold based on time window (shorter = smaller moves matter)
+    threshold_map = {1: 1, 6: 2, 24: 3}
+    threshold = threshold_map.get(hours, 3)
+
+    status_msg = f"Finding biggest movers ({time_label})"
     if category:
         status_msg += f" [{category}]"
     await update.message.reply_text(status_msg + "...")
@@ -875,8 +1008,8 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         slugs = [e["slug"] for e in events]
 
-        # Get price deltas for 24h
-        price_deltas_24h = get_price_deltas_bulk(slugs, hours=24)
+        # Get price deltas for specified time window
+        price_deltas = get_price_deltas_bulk(slugs, hours=hours)
 
         # Get velocity for context
         deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
@@ -887,13 +1020,13 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             slug = event["slug"]
             total_volume = event["total_volume"]
 
-            # Get price change (no volume filter - let the price movement speak)
-            price_data = price_deltas_24h.get(slug, {})
+            # Get price change for the specified window
+            price_data = price_deltas.get(slug, {})
             price_change = price_data.get("delta", 0)
             old_price = price_data.get("old", 0)
 
-            # Must have meaningful move (>=3%) - lowered from 5%
-            if abs(price_change) < 3:
+            # Must have meaningful move (threshold scales with time window)
+            if abs(price_change) < threshold:
                 continue
 
             velocity = deltas_1h.get(slug, 0)
@@ -913,10 +1046,9 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if not movers:
             cat_msg = f" in {category}" if category else ""
             await update.message.reply_text(
-                f"No movers{cat_msg} found right now.\n\n"
-                "Movers require:\n"
-                "- Price moved >=3% in 24h\n"
-                "- May need 24h of price data to accumulate"
+                f"No movers{cat_msg} in last {time_label}.\n\n"
+                f"Movers require price move >={threshold}% in {time_label}.\n"
+                f"Try a longer window: /movers 24h"
             )
             return
 
@@ -925,12 +1057,13 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             m["velocity"] = m.get("velocity", 0)
             m["price_change_24h"] = m.get("price_change", 0)
 
-        # Split into gainers and losers
-        gainers = [m for m in movers if m["price_change"] > 0][:5]
-        losers = [m for m in movers if m["price_change"] < 0][:5]
+        # Split into gainers and losers (half of count each)
+        half_count = max(count // 2, 3)
+        gainers = [m for m in movers if m["price_change"] > 0][:half_count]
+        losers = [m for m in movers if m["price_change"] < 0][:half_count]
 
         cat_label = f" [{category}]" if category else ""
-        header = f"""📊 Biggest Movers (24h){cat_label}
+        header = f"""📊 Biggest Movers ({time_label}){cat_label}
 
 Prices changed = opinions shifted.
 Something happened in these markets.
@@ -956,7 +1089,7 @@ Something happened in these markets.
                 lines.append("")
 
         message = "\n".join(lines).strip()
-        await update.message.reply_text(message, disable_web_page_preview=True)
+        await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
 
     except Exception as e:
         logger.error(f"Error in movers: {e}")

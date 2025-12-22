@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 def is_resolved_price(yes_price: float) -> bool:
     """
     Check if a market is essentially resolved (YES >= 95% or YES <= 5%).
-    These markets have no edge - outcome is already known.
+    Only filter truly resolved markets - 90%+ can still revert on news.
 
     Args:
         yes_price: Current YES price (0-100 scale)
@@ -670,6 +670,11 @@ def _format_volume(amount: float) -> str:
         return f"${amount:.0f}"
 
 
+def _escape_markdown(text: str) -> str:
+    """Escape markdown special characters in text."""
+    return text.replace("[", "\\[").replace("]", "\\]").replace("(", "\\(").replace(")", "\\)").replace("_", "\\_").replace("*", "\\*")
+
+
 def format_market_card(
     market: dict,
     style: str = "full",
@@ -801,9 +806,11 @@ def format_market_card(
     # === FULL FORMAT ===
     lines = []
 
-    # Title (truncate to 50 chars)
+    # Title as clickable link (truncate to 50 chars)
     title_display = title[:50] + "..." if len(title) > 50 else title
-    lines.append(title_display)
+    # Escape markdown special chars in title
+    title_escaped = _escape_markdown(title_display)
+    lines.append(f"[{title_escaped}](https://polymarket.com/event/{slug})")
     lines.append("")
 
     # Context line if provided (e.g., "Crossed $100K", "Created 5h ago")
@@ -825,10 +832,6 @@ def format_market_card(
     # Closes line (if available)
     if closes_str:
         lines.append(f"Closes: {closes_str}")
-
-    # Link
-    lines.append("")
-    lines.append(f"polymarket.com/event/{slug}")
 
     return "\n".join(lines)
 
@@ -885,10 +888,10 @@ def format_bundled_milestones(milestones: list[dict]) -> str:
     if not milestones:
         return ""
 
-    lines = ["Volume Milestones", ""]
+    lines = ["*Volume Milestones*", ""]
 
     for m in milestones:
-        title = m.get("title", "Unknown")[:45]
+        title = _escape_markdown(m.get("title", "Unknown")[:45])
         threshold = m.get("threshold", 0)
         volume = m.get("current_volume", 0)
         yes_price = m.get("yes_price", 0)
@@ -907,10 +910,9 @@ def format_bundled_milestones(milestones: list[dict]) -> str:
         elif velocity_pct >= 10:
             vel_emoji = " 🔥"
 
-        lines.append(f"- {title}")
-        lines.append(f"  Crossed {threshold_str} | Now {volume_str}")
-        lines.append(f"  YES: {yes_price:.0f}% | {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
-        lines.append(f"  polymarket.com/event/{slug}")
+        lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+        lines.append(f"Crossed {threshold_str} → Now {volume_str}")
+        lines.append(f"YES: {yes_price:.0f}% | {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -921,10 +923,10 @@ def format_bundled_discoveries(discoveries: list[dict]) -> str:
     if not discoveries:
         return ""
 
-    lines = ["New Discovery (created <48h, launched big)", ""]
+    lines = ["*New Discovery* (created <48h, launched big)", ""]
 
     for d in discoveries:
-        title = d.get("title", "Unknown")[:45]
+        title = _escape_markdown(d.get("title", "Unknown")[:45])
         volume = d.get("current_volume", 0)
         yes_price = d.get("yes_price", 0)
         slug = d.get("slug", "")
@@ -941,10 +943,9 @@ def format_bundled_discoveries(discoveries: list[dict]) -> str:
         elif velocity_pct >= 10:
             vel_emoji = " 🔥"
 
-        lines.append(f"- {title}")
-        lines.append(f"  Volume: {volume_str} | YES: {yes_price:.0f}%")
-        lines.append(f"  Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
-        lines.append(f"  polymarket.com/event/{slug}")
+        lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+        lines.append(f"Volume: {volume_str} | YES: {yes_price:.0f}%")
+        lines.append(f"Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -1173,10 +1174,10 @@ def format_bundled_closing_soon(alerts: list[dict]) -> str:
     if not alerts:
         return ""
 
-    lines = ["Closing Soon (action before resolution)", ""]
+    lines = ["*Closing Soon* (action before resolution)", ""]
 
     for a in alerts:
-        title = a.get("title", "Unknown")[:40]
+        title = _escape_markdown(a.get("title", "Unknown")[:40])
         yes_price = a.get("yes_price", 0)
         hours_left = a.get("hours_left", 0)
         velocity = a.get("velocity", 0)
@@ -1185,9 +1186,8 @@ def format_bundled_closing_soon(alerts: list[dict]) -> str:
         time_str = f"{hours_left:.0f}h left" if hours_left >= 1 else f"{hours_left*60:.0f}m left"
         vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
 
-        lines.append(f"- {title}")
-        lines.append(f"  {time_str} | YES: {yes_price:.0f}% | {vel_str}")
-        lines.append(f"  polymarket.com/event/{slug}")
+        lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+        lines.append(f"⏰ {time_str} | YES: {yes_price:.0f}% | {vel_str}")
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -1236,6 +1236,525 @@ def format_bundled_new_markets(markets: list[dict]) -> str:
         lines.append(f"- {title}")
         lines.append(f"  YES: {yes_price:.0f}% | Volume: {volume_str}")
         lines.append(f"  polymarket.com/event/{slug}")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+# ============================================
+# ALERTS V2 - New Alert System
+# ============================================
+
+async def check_wakeup_alerts(
+    target_count: int = 500,
+    quiet_threshold: float = 2.0,
+    hot_threshold: float = 10.0,
+    quiet_hours: int = 6,
+) -> list[dict]:
+    """
+    Find markets that were quiet but are now waking up.
+
+    Trigger: Was <2%/hr velocity for 6h, now >10%/hr
+    This catches breaking news - market was dead, now money rushing in.
+
+    Args:
+        target_count: How many markets to fetch
+        quiet_threshold: Max velocity %/hr to be considered "quiet"
+        hot_threshold: Min velocity %/hr to be considered "hot now"
+        quiet_hours: How long must have been quiet
+
+    Returns:
+        List of markets that just woke up
+    """
+    from database import get_volume_deltas_bulk
+
+    # Fetch markets
+    events = await get_all_markets_paginated(target_count=target_count, include_spam=False)
+    events = filter_sports(events)
+    events = filter_resolved(events)
+
+    slugs = [e.get("slug") for e in events if e.get("slug")]
+
+    # Get current velocity (1h)
+    deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
+
+    # Get past velocity (6h average per hour)
+    deltas_6h = get_volume_deltas_bulk(slugs, hours=quiet_hours)
+
+    wakeups = []
+
+    for event in events:
+        slug = event.get("slug")
+        total_volume = event.get("total_volume", 0)
+
+        if not slug or total_volume == 0:
+            continue
+
+        # Current velocity (1h)
+        velocity_1h = deltas_1h.get(slug, 0)
+        velocity_pct_now = (velocity_1h / total_volume * 100) if total_volume > 0 else 0
+
+        # Past velocity (average per hour over 6h)
+        velocity_6h = deltas_6h.get(slug, 0)
+        velocity_pct_past = (velocity_6h / total_volume * 100 / quiet_hours) if total_volume > 0 else 0
+
+        # Check: was quiet, now hot
+        if velocity_pct_past < quiet_threshold and velocity_pct_now >= hot_threshold:
+            wakeups.append({
+                "title": event.get("title"),
+                "slug": slug,
+                "yes_price": event.get("yes_price", 0),
+                "total_volume": total_volume,
+                "velocity_past": velocity_6h / quiet_hours,
+                "velocity_pct_past": velocity_pct_past,
+                "velocity_now": velocity_1h,
+                "velocity_pct_now": velocity_pct_now,
+                "tags": event.get("tags", []),
+            })
+
+    # Sort by current velocity (hottest first)
+    wakeups.sort(key=lambda x: x["velocity_pct_now"], reverse=True)
+
+    return wakeups
+
+
+async def check_fast_mover_alerts(
+    target_count: int = 500,
+    price_threshold: float = 10.0,
+    volume_threshold: float = 10000,
+    hours: int = 2,
+) -> list[dict]:
+    """
+    Find markets with significant price moves backed by volume.
+
+    Trigger: Price moved >=10% in 2h AND volume delta >=$10K in same period
+    This catches informed money moving prices.
+
+    Args:
+        target_count: How many markets to fetch
+        price_threshold: Minimum price change %
+        volume_threshold: Minimum volume behind the move
+        hours: Time window to check
+
+    Returns:
+        List of fast-moving markets
+    """
+    from database import get_volume_deltas_bulk, get_price_deltas_bulk
+
+    # Fetch markets
+    events = await get_all_markets_paginated(target_count=target_count, include_spam=False)
+    events = filter_sports(events)
+    events = filter_resolved(events)
+
+    slugs = [e.get("slug") for e in events if e.get("slug")]
+
+    # Get price and volume deltas
+    price_deltas = get_price_deltas_bulk(slugs, hours=hours)
+    volume_deltas = get_volume_deltas_bulk(slugs, hours=hours)
+    velocity_1h = get_volume_deltas_bulk(slugs, hours=1)
+
+    movers = []
+
+    for event in events:
+        slug = event.get("slug")
+        total_volume = event.get("total_volume", 0)
+
+        if not slug:
+            continue
+
+        # Get price change
+        price_data = price_deltas.get(slug, {})
+        price_change = price_data.get("delta", 0)
+        old_price = price_data.get("old", 0)
+        current_price = event.get("yes_price", 0)
+
+        # Get volume behind move
+        volume_behind = volume_deltas.get(slug, 0)
+
+        # Check thresholds
+        if abs(price_change) >= price_threshold and volume_behind >= volume_threshold:
+            velocity = velocity_1h.get(slug, 0)
+            velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
+
+            movers.append({
+                "title": event.get("title"),
+                "slug": slug,
+                "old_price": old_price,
+                "current_price": current_price,
+                "price_change": price_change,
+                "volume_behind": volume_behind,
+                "velocity": velocity,
+                "velocity_pct": velocity_pct,
+                "total_volume": total_volume,
+                "direction": "up" if price_change > 0 else "down",
+                "tags": event.get("tags", []),
+            })
+
+    # Sort by absolute price change
+    movers.sort(key=lambda x: abs(x["price_change"]), reverse=True)
+
+    return movers
+
+
+async def check_early_heat_alerts(
+    target_count: int = 500,
+    max_age_hours: int = 24,
+    max_volume: float = 50000,
+    min_velocity_pct: float = 15.0,
+) -> list[dict]:
+    """
+    Find new markets that are gaining traction fast.
+
+    Trigger: Created <24h ago AND volume <$50K AND velocity >15%/hr
+    This catches markets that are small but growing fast.
+
+    Args:
+        target_count: How many markets to fetch
+        max_age_hours: Maximum age of market
+        max_volume: Maximum current volume
+        min_velocity_pct: Minimum velocity %/hr
+
+    Returns:
+        List of early heat markets
+    """
+    from datetime import datetime, timezone
+    from database import get_volume_deltas_bulk, get_recently_seen_slugs
+
+    # Get recently seen markets
+    recent = get_recently_seen_slugs(hours=max_age_hours)
+    recent_slugs = {r.get("event_slug"): r for r in recent}
+
+    if not recent_slugs:
+        return []
+
+    # Fetch current market data
+    events = await get_all_markets_paginated(target_count=target_count, include_spam=False)
+    events = filter_sports(events)
+    events = filter_resolved(events)
+
+    # Filter to only recent markets
+    events = [e for e in events if e.get("slug") in recent_slugs]
+
+    slugs = [e.get("slug") for e in events if e.get("slug")]
+
+    # Get velocity data
+    deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
+
+    early_heat = []
+    now = datetime.now(timezone.utc)
+
+    for event in events:
+        slug = event.get("slug")
+        total_volume = event.get("total_volume", 0)
+
+        if not slug or total_volume > max_volume:
+            continue
+
+        # Get velocity
+        velocity = deltas_1h.get(slug, 0)
+        velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
+
+        if velocity_pct < min_velocity_pct:
+            continue
+
+        # Calculate hours since launch
+        seen_data = recent_slugs.get(slug, {})
+        first_seen = seen_data.get("first_seen_at")
+        hours_ago = 0
+
+        if first_seen:
+            try:
+                if isinstance(first_seen, str):
+                    seen_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+                else:
+                    seen_dt = first_seen.replace(tzinfo=timezone.utc)
+                hours_ago = (now - seen_dt).total_seconds() / 3600
+            except:
+                pass
+
+        early_heat.append({
+            "title": event.get("title"),
+            "slug": slug,
+            "yes_price": event.get("yes_price", 0),
+            "total_volume": total_volume,
+            "velocity": velocity,
+            "velocity_pct": velocity_pct,
+            "hours_ago": hours_ago,
+            "tags": event.get("tags", []),
+        })
+
+    # Sort by velocity
+    early_heat.sort(key=lambda x: x["velocity_pct"], reverse=True)
+
+    return early_heat
+
+
+async def check_new_launch_alerts(
+    target_count: int = 500,
+    max_age_hours: int = 1,
+) -> list[dict]:
+    """
+    Find brand new markets (launched within 1 hour).
+
+    Trigger: first_seen_at <1h ago
+    This catches new market launches.
+
+    Args:
+        target_count: How many markets to fetch
+        max_age_hours: Maximum age (default 1h = brand new)
+
+    Returns:
+        List of new markets
+    """
+    from datetime import datetime, timezone
+    from database import get_recently_seen_slugs
+
+    # Get very recently seen markets
+    recent = get_recently_seen_slugs(hours=max_age_hours)
+    recent_slugs = {r.get("event_slug"): r for r in recent}
+
+    if not recent_slugs:
+        return []
+
+    # Fetch current market data
+    events = await get_all_markets_paginated(target_count=target_count, include_spam=False)
+    events = filter_sports(events)
+    events = filter_resolved(events)
+
+    # Filter to only recent markets
+    events = [e for e in events if e.get("slug") in recent_slugs]
+
+    new_launches = []
+    now = datetime.now(timezone.utc)
+
+    for event in events:
+        slug = event.get("slug")
+
+        if not slug:
+            continue
+
+        # Calculate hours since launch
+        seen_data = recent_slugs.get(slug, {})
+        first_seen = seen_data.get("first_seen_at")
+        hours_ago = 0
+
+        if first_seen:
+            try:
+                if isinstance(first_seen, str):
+                    seen_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+                else:
+                    seen_dt = first_seen.replace(tzinfo=timezone.utc)
+                hours_ago = (now - seen_dt).total_seconds() / 3600
+            except:
+                pass
+
+        new_launches.append({
+            "title": event.get("title"),
+            "slug": slug,
+            "yes_price": event.get("yes_price", 0),
+            "total_volume": event.get("total_volume", 0),
+            "hours_ago": hours_ago,
+            "tags": event.get("tags", []),
+        })
+
+    # Sort by most recent first
+    new_launches.sort(key=lambda x: x["hours_ago"])
+
+    return new_launches
+
+
+# ============================================
+# ALERTS V2 - Formatters
+# ============================================
+
+def format_wakeup_alert(market: dict) -> str:
+    """Format a wakeup alert for Telegram."""
+    title = _escape_markdown(market.get("title", "Unknown")[:50])
+    slug = market.get("slug", "")
+    yes_price = market.get("yes_price", 0)
+    total_volume = market.get("total_volume", 0)
+    velocity_past = market.get("velocity_past", 0)
+    velocity_now = market.get("velocity_now", 0)
+    velocity_pct_now = market.get("velocity_pct_now", 0)
+
+    vol_str = _format_volume(total_volume)
+    vel_past_str = f"<${velocity_past/1000:.0f}K/hr" if velocity_past >= 1000 else f"<${velocity_past:.0f}/hr"
+    vel_now_str = f"+${velocity_now/1000:.0f}K/hr" if velocity_now >= 1000 else f"+${velocity_now:.0f}/hr"
+
+    # Emoji
+    vel_emoji = " 🔥🔥" if velocity_pct_now >= 20 else " 🔥"
+
+    return f"""⚡ *Market Waking Up*
+
+[{title}](https://polymarket.com/event/{slug})
+
+Was quiet: {vel_past_str} for 6h
+Now hot: {vel_now_str} ({velocity_pct_now:.1f}%/hr){vel_emoji}
+Volume: {vol_str} | YES: {yes_price:.0f}%"""
+
+
+def format_fast_mover_alert(market: dict) -> str:
+    """Format a fast mover alert for Telegram."""
+    title = _escape_markdown(market.get("title", "Unknown")[:50])
+    slug = market.get("slug", "")
+    old_price = market.get("old_price", 0)
+    current_price = market.get("current_price", 0)
+    price_change = market.get("price_change", 0)
+    volume_behind = market.get("volume_behind", 0)
+    velocity = market.get("velocity", 0)
+    velocity_pct = market.get("velocity_pct", 0)
+    direction = market.get("direction", "up")
+
+    emoji = "📈" if direction == "up" else "📉"
+    rocket = " 🚀" if price_change >= 15 else (" 💀" if price_change <= -15 else "")
+    change_str = f"+{price_change:.0f}%" if price_change > 0 else f"{price_change:.0f}%"
+    vol_behind_str = f"+${volume_behind/1000:.0f}K" if volume_behind >= 1000 else f"+${volume_behind:.0f}"
+    vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+
+    return f"""{emoji} *Fast Mover*
+
+[{title}](https://polymarket.com/event/{slug})
+
+Price: {old_price:.0f}% → {current_price:.0f}% ({change_str}) in 2h{rocket}
+Volume behind move: {vol_behind_str}
+Velocity: {vel_str} ({velocity_pct:.1f}%/hr)"""
+
+
+def format_early_heat_alert(market: dict) -> str:
+    """Format an early heat alert for Telegram."""
+    title = _escape_markdown(market.get("title", "Unknown")[:50])
+    slug = market.get("slug", "")
+    yes_price = market.get("yes_price", 0)
+    total_volume = market.get("total_volume", 0)
+    velocity = market.get("velocity", 0)
+    velocity_pct = market.get("velocity_pct", 0)
+    hours_ago = market.get("hours_ago", 0)
+
+    vol_str = _format_volume(total_volume)
+    vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+    time_ago = f"{hours_ago:.0f}h ago" if hours_ago >= 1 else f"{hours_ago*60:.0f}m ago"
+
+    vel_emoji = " 🔥🔥" if velocity_pct >= 20 else " 🔥"
+
+    return f"""🌱 *Early Heat*
+
+[{title}](https://polymarket.com/event/{slug})
+
+Launched: {time_ago}
+Volume: {vol_str} | Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}
+Odds: YES at {yes_price:.0f}%"""
+
+
+def format_new_launch_alert(market: dict) -> str:
+    """Format a new launch alert for Telegram."""
+    title = _escape_markdown(market.get("title", "Unknown")[:50])
+    slug = market.get("slug", "")
+    yes_price = market.get("yes_price", 0)
+
+    return f"""🆕 *New Market*
+
+[{title}](https://polymarket.com/event/{slug})
+
+Just launched
+Odds: YES at {yes_price:.0f}%"""
+
+
+def format_bundled_wakeups(alerts: list[dict]) -> str:
+    """Format multiple wakeup alerts into bundled message."""
+    if not alerts:
+        return ""
+
+    lines = ["⚡ *Markets Waking Up*", ""]
+
+    for a in alerts:
+        title = _escape_markdown(a.get("title", "Unknown")[:40])
+        slug = a.get("slug", "")
+        velocity_now = a.get("velocity_now", 0)
+        velocity_pct_now = a.get("velocity_pct_now", 0)
+        total_volume = a.get("total_volume", 0)
+        yes_price = a.get("yes_price", 0)
+
+        vol_str = _format_volume(total_volume)
+        vel_str = f"+${velocity_now/1000:.0f}K/hr" if velocity_now >= 1000 else f"+${velocity_now:.0f}/hr"
+        vel_emoji = " 🔥🔥" if velocity_pct_now >= 20 else " 🔥"
+
+        lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+        lines.append(f"Was quiet → Now: {vel_str} ({velocity_pct_now:.1f}%/hr){vel_emoji}")
+        lines.append(f"Volume: {vol_str} | YES: {yes_price:.0f}%")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def format_bundled_fast_movers(alerts: list[dict]) -> str:
+    """Format multiple fast mover alerts into bundled message."""
+    if not alerts:
+        return ""
+
+    lines = ["📈 *Fast Movers*", ""]
+
+    for a in alerts:
+        title = _escape_markdown(a.get("title", "Unknown")[:40])
+        slug = a.get("slug", "")
+        old_price = a.get("old_price", 0)
+        current_price = a.get("current_price", 0)
+        price_change = a.get("price_change", 0)
+        volume_behind = a.get("volume_behind", 0)
+
+        change_str = f"+{price_change:.0f}%" if price_change > 0 else f"{price_change:.0f}%"
+        vol_str = f"+${volume_behind/1000:.0f}K" if volume_behind >= 1000 else f"+${volume_behind:.0f}"
+        emoji = "🚀" if price_change >= 15 else ("💀" if price_change <= -15 else ("⬆️" if price_change > 0 else "⬇️"))
+
+        lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+        lines.append(f"{emoji} {old_price:.0f}% → {current_price:.0f}% ({change_str}) | {vol_str} behind")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def format_bundled_early_heat(alerts: list[dict]) -> str:
+    """Format multiple early heat alerts into bundled message."""
+    if not alerts:
+        return ""
+
+    lines = ["🌱 *Early Heat*", ""]
+
+    for a in alerts:
+        title = _escape_markdown(a.get("title", "Unknown")[:40])
+        slug = a.get("slug", "")
+        total_volume = a.get("total_volume", 0)
+        velocity = a.get("velocity", 0)
+        velocity_pct = a.get("velocity_pct", 0)
+        hours_ago = a.get("hours_ago", 0)
+        yes_price = a.get("yes_price", 0)
+
+        vol_str = _format_volume(total_volume)
+        vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+        time_ago = f"{hours_ago:.0f}h ago" if hours_ago >= 1 else f"{hours_ago*60:.0f}m ago"
+        vel_emoji = " 🔥🔥" if velocity_pct >= 20 else " 🔥"
+
+        lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+        lines.append(f"Launched: {time_ago} | {vol_str}")
+        lines.append(f"Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji} | YES: {yes_price:.0f}%")
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def format_bundled_new_launches(alerts: list[dict]) -> str:
+    """Format multiple new launch alerts into bundled message."""
+    if not alerts:
+        return ""
+
+    lines = ["🆕 *New Markets*", ""]
+
+    for a in alerts:
+        title = _escape_markdown(a.get("title", "Unknown")[:40])
+        slug = a.get("slug", "")
+        yes_price = a.get("yes_price", 0)
+
+        lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+        lines.append(f"Just launched | YES: {yes_price:.0f}%")
         lines.append("")
 
     return "\n".join(lines).strip()

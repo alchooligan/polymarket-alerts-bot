@@ -1,6 +1,13 @@
 """
 Scheduler for periodic alert checks.
 Uses APScheduler to run checks every X minutes.
+
+ALERTS V2:
+- Wakeup: Market was quiet, now hot (breaking news)
+- Fast Mover: Price moved 10%+ with volume behind it
+- Early Heat: New market (<24h) gaining traction
+- New Launch: Brand new market alerts
+- Watchlist: Price moves on watched markets
 """
 
 import logging
@@ -28,14 +35,18 @@ from database import (
 )
 from polymarket import get_all_markets_paginated
 from alerts import (
-    check_new_markets,
-    check_volume_milestones,
-    check_closing_soon_alerts,
-    format_bundled_milestones,
-    format_bundled_discoveries,
-    format_bundled_new_markets,
-    format_bundled_closing_soon,
     filter_sports,
+    # V2 Alert functions
+    check_wakeup_alerts,
+    check_fast_mover_alerts,
+    check_early_heat_alerts,
+    check_new_launch_alerts,
+    # V2 Formatters
+    format_bundled_wakeups,
+    format_bundled_fast_movers,
+    format_bundled_early_heat,
+    format_bundled_new_launches,
+    _escape_markdown,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,6 +64,7 @@ async def send_alert_to_user(app: Application, telegram_id: int, message: str, a
         await app.bot.send_message(
             chat_id=telegram_id,
             text=message,
+            parse_mode="Markdown",
             disable_web_page_preview=True
         )
         # Log the alert
@@ -65,39 +77,47 @@ async def send_alert_to_user(app: Application, telegram_id: int, message: str, a
 
 async def run_alert_cycle(app: Application) -> dict:
     """
-    Run one cycle of alert checks.
+    Run one cycle of alert checks (V2).
     Called by the scheduler every X minutes.
+
+    V2 Alerts:
+    - Wakeup: Was quiet, now hot
+    - Fast Mover: Price + volume spike
+    - Early Heat: New market with traction
+    - New Launch: Brand new markets
+    - Watchlist: Price moves
 
     Returns:
         Dict with stats about what was checked
     """
-    logger.info("Running alert cycle...")
+    logger.info("Running alert cycle (V2)...")
 
     stats = {
         "markets_scanned": 0,
-        "milestones": 0,
-        "discoveries": 0,
-        "closing_soon": 0,
+        "wakeups": 0,
+        "fast_movers": 0,
+        "early_heat": 0,
+        "new_launches": 0,
         "watchlist": 0,
         "alerts_sent": 0,
     }
 
     # Save volume snapshots FIRST - we need this data regardless of users
-    events = []  # Initialize to prevent undefined variable
+    events = []
     try:
         logger.info("Fetching markets for snapshots...")
         events = await get_all_markets_paginated(target_count=MARKETS_TO_SCAN, include_spam=False)
         if events:
             save_volume_snapshots_bulk(events)
-            save_price_snapshots_bulk(events)  # Critical for /movers, /underdogs, price history
+            save_price_snapshots_bulk(events)
             stats["markets_scanned"] = len(events)
             logger.info(f"Saved {len(events)} volume + price snapshots")
         else:
-            logger.warning("API returned 0 events - velocity/watchlist checks will be skipped")
-            return stats  # Can't do anything useful without market data
+            logger.warning("API returned 0 events - skipping alerts")
+            return stats
     except Exception as e:
         logger.error(f"Failed to fetch markets: {e} - aborting cycle")
-        return stats  # Don't continue with stale/no data
+        return stats
 
     # Get users with alerts enabled
     users = get_all_users_with_alerts_enabled()
@@ -105,86 +125,119 @@ async def run_alert_cycle(app: Application) -> dict:
         logger.info("No users with alerts enabled, skipping alert checks")
         return stats
 
-    # Users who want milestone/discovery alerts
-    milestone_users = [u for u in users if u.get("new_markets_enabled")]
+    alert_users = [u for u in users if u.get("new_markets_enabled")]
 
-    # Check for volume milestones (the KEY signal)
-    if milestone_users:
-        logger.info(f"Checking volume milestones for {len(milestone_users)} users...")
-        milestones, discoveries = await check_volume_milestones(
-            target_count=MARKETS_TO_SCAN,
-            record=True
-        )
-        stats["milestones"] = len(milestones)
-        stats["discoveries"] = len(discoveries)
-        stats["markets_scanned"] = MARKETS_TO_SCAN  # Approximate
+    # ==========================================
+    # ALERT 1: Wakeup (was quiet, now hot)
+    # ==========================================
+    if alert_users:
+        try:
+            logger.info("Checking wakeup alerts...")
+            wakeups = await check_wakeup_alerts(target_count=MARKETS_TO_SCAN)
+            stats["wakeups"] = len(wakeups)
 
-        if milestones:
-            # Per-user filtering
-            for user in milestone_users:
-                user_id = user["telegram_id"]
-                user_milestones = filter_unseen_markets(user_id, milestones, "milestone")
+            if wakeups:
+                for user in alert_users:
+                    user_id = user["telegram_id"]
+                    user_wakeups = filter_unseen_markets(user_id, wakeups, "wakeup")
 
-                if not user_milestones:
-                    continue
+                    if not user_wakeups:
+                        continue
 
-                to_send = user_milestones[:ALERT_CAP_PER_CYCLE]
-                overflow = len(user_milestones) - len(to_send)
+                    to_send = user_wakeups[:ALERT_CAP_PER_CYCLE]
+                    message = format_bundled_wakeups(to_send)
 
-                message = format_bundled_milestones(to_send)
-                if overflow > 0:
-                    message += f"\n\n+{overflow} more volume milestones. Use /top to explore."
+                    sent = await send_alert_to_user(app, user_id, message, "wakeup_bundle", None)
+                    if sent:
+                        stats["alerts_sent"] += 1
+                        mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "wakeup")
+        except Exception as e:
+            logger.error(f"Error in wakeup alerts: {e}")
 
-                sent = await send_alert_to_user(app, user_id, message, "milestone_bundle", None)
-                if sent:
-                    stats["alerts_sent"] += 1
-                    mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "milestone")
+    # ==========================================
+    # ALERT 2: Fast Mover (price + volume spike)
+    # ==========================================
+    if alert_users:
+        try:
+            logger.info("Checking fast mover alerts...")
+            movers = await check_fast_mover_alerts(target_count=MARKETS_TO_SCAN)
+            stats["fast_movers"] = len(movers)
 
-        # Send discovery alerts (first-seen markets that launched big)
-        if discoveries:
-            for user in milestone_users:
-                user_id = user["telegram_id"]
-                user_discoveries = filter_unseen_markets(user_id, discoveries, "discovery")
+            if movers:
+                for user in alert_users:
+                    user_id = user["telegram_id"]
+                    user_movers = filter_unseen_markets(user_id, movers, "fast_mover")
 
-                if not user_discoveries:
-                    continue
+                    if not user_movers:
+                        continue
 
-                to_send = user_discoveries[:ALERT_CAP_PER_CYCLE]
-                overflow = len(user_discoveries) - len(to_send)
+                    to_send = user_movers[:ALERT_CAP_PER_CYCLE]
+                    message = format_bundled_fast_movers(to_send)
 
-                message = format_bundled_discoveries(to_send)
-                if overflow > 0:
-                    message += f"\n\n+{overflow} more new discoveries"
+                    sent = await send_alert_to_user(app, user_id, message, "fast_mover_bundle", None)
+                    if sent:
+                        stats["alerts_sent"] += 1
+                        mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "fast_mover")
+        except Exception as e:
+            logger.error(f"Error in fast mover alerts: {e}")
 
-                sent = await send_alert_to_user(app, user_id, message, "discovery_bundle", None)
-                if sent:
-                    stats["alerts_sent"] += 1
-                    mark_user_alerted_bulk(user_id, [d["slug"] for d in to_send], "discovery")
+    # ==========================================
+    # ALERT 3: Early Heat (new market + traction)
+    # ==========================================
+    if alert_users:
+        try:
+            logger.info("Checking early heat alerts...")
+            early = await check_early_heat_alerts(target_count=MARKETS_TO_SCAN)
+            stats["early_heat"] = len(early)
 
-    # Check for closing soon alerts (markets ending soon with action)
-    closing_users = [u for u in users if u.get("new_markets_enabled")]
-    if closing_users:
-        logger.info("Checking closing soon alerts...")
-        closing = await check_closing_soon_alerts(target_count=MARKETS_TO_SCAN)
-        stats["closing_soon"] = len(closing)
+            if early:
+                for user in alert_users:
+                    user_id = user["telegram_id"]
+                    user_early = filter_unseen_markets(user_id, early, "early_heat")
 
-        if closing:
-            for user in closing_users:
-                user_id = user["telegram_id"]
-                user_closing = filter_unseen_markets(user_id, closing, "closing_soon")
+                    if not user_early:
+                        continue
 
-                if not user_closing:
-                    continue
+                    to_send = user_early[:ALERT_CAP_PER_CYCLE]
+                    message = format_bundled_early_heat(to_send)
 
-                to_send = user_closing[:ALERT_CAP_PER_CYCLE]
-                message = format_bundled_closing_soon(to_send)
+                    sent = await send_alert_to_user(app, user_id, message, "early_heat_bundle", None)
+                    if sent:
+                        stats["alerts_sent"] += 1
+                        mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "early_heat")
+        except Exception as e:
+            logger.error(f"Error in early heat alerts: {e}")
 
-                sent = await send_alert_to_user(app, user_id, message, "closing_bundle", None)
-                if sent:
-                    stats["alerts_sent"] += 1
-                    mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "closing_soon")
+    # ==========================================
+    # ALERT 4: New Launch (brand new markets)
+    # ==========================================
+    if alert_users:
+        try:
+            logger.info("Checking new launch alerts...")
+            launches = await check_new_launch_alerts(target_count=MARKETS_TO_SCAN)
+            stats["new_launches"] = len(launches)
 
-    # Check watchlist price changes (5% moves)
+            if launches:
+                for user in alert_users:
+                    user_id = user["telegram_id"]
+                    user_launches = filter_unseen_markets(user_id, launches, "new_launch")
+
+                    if not user_launches:
+                        continue
+
+                    to_send = user_launches[:ALERT_CAP_PER_CYCLE]
+                    message = format_bundled_new_launches(to_send)
+
+                    sent = await send_alert_to_user(app, user_id, message, "new_launch_bundle", None)
+                    if sent:
+                        stats["alerts_sent"] += 1
+                        mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "new_launch")
+        except Exception as e:
+            logger.error(f"Error in new launch alerts: {e}")
+
+    # ==========================================
+    # ALERT 5: Watchlist (price moves)
+    # ==========================================
     watched = get_all_watched_markets()
     if watched:
         logger.info(f"Checking {len(watched)} watched markets...")
@@ -208,11 +261,14 @@ async def run_alert_cycle(app: Application) -> dict:
                 stats["watchlist"] += 1
 
                 change_str = f"+{change:.0f}%" if change > 0 else f"{change:.0f}%"
-                message = f"""Watchlist Alert
+                emoji = "📈" if change > 0 else "📉"
+                title_escaped = _escape_markdown(title[:40])
 
-- {title}
-  YES: {last_price:.0f}% → {current_price:.0f}% ({change_str})
-  polymarket.com/event/{slug}"""
+                message = f"""{emoji} *Watchlist Alert*
+
+[{title_escaped}](https://polymarket.com/event/{slug})
+
+YES: {last_price:.0f}% → {current_price:.0f}% ({change_str})"""
 
                 sent = await send_alert_to_user(app, user_id, message, "watchlist", slug)
                 if sent:
@@ -221,7 +277,7 @@ async def run_alert_cycle(app: Application) -> dict:
                 # Update the stored price
                 update_watchlist_price(user_id, slug, current_price)
 
-    logger.info("Alert cycle complete")
+    logger.info(f"Alert cycle complete: {stats}")
     return stats
 
 
@@ -240,7 +296,7 @@ def start_scheduler(app: Application) -> AsyncIOScheduler:
         trigger=IntervalTrigger(minutes=CHECK_INTERVAL_MINUTES),
         args=[app],
         id="alert_cycle",
-        name="Polymarket Alert Cycle",
+        name="Polymarket Alert Cycle V2",
         replace_existing=True,
     )
 
@@ -255,7 +311,7 @@ def start_scheduler(app: Application) -> AsyncIOScheduler:
     )
 
     scheduler.start()
-    logger.info(f"Scheduler started. Alerts every {CHECK_INTERVAL_MINUTES} min, digest at {DAILY_DIGEST_HOUR}:00 UTC.")
+    logger.info(f"Scheduler started (V2). Alerts every {CHECK_INTERVAL_MINUTES} min, digest at {DAILY_DIGEST_HOUR}:00 UTC.")
 
     return scheduler
 
@@ -274,6 +330,7 @@ async def run_daily_digest(app: Application) -> dict:
     Shows: hottest by velocity %, biggest movers, volume surge leaders.
     """
     from database import get_volume_deltas_bulk, get_price_deltas_bulk
+    from alerts import _escape_markdown
 
     logger.info("Running daily digest...")
 
@@ -295,7 +352,6 @@ async def run_daily_digest(app: Application) -> dict:
 
         # Filter out sports and resolved markets
         events = filter_sports(events)
-        # Filter resolved (95%+ or 5%-)
         events = [e for e in events if 5 < e.get("yes_price", 50) < 95]
 
         slugs = [e.get("slug") for e in events if e.get("slug")]
@@ -305,9 +361,9 @@ async def run_daily_digest(app: Application) -> dict:
         deltas_24h = get_volume_deltas_bulk(slugs, hours=24)
         price_deltas_24h = get_price_deltas_bulk(slugs, hours=24)
 
-        lines = ["Daily Digest", ""]
+        lines = ["*Daily Digest*", ""]
 
-        # 1. HOTTEST (by velocity %/hr) - the KEY signal
+        # 1. HOTTEST (by velocity %/hr)
         hot_markets = []
         for e in events:
             slug = e.get("slug")
@@ -319,14 +375,15 @@ async def run_daily_digest(app: Application) -> dict:
         hot_markets.sort(key=lambda x: x["velocity_pct"], reverse=True)
 
         if hot_markets[:5]:
-            lines.append("🔥 HOTTEST (velocity %/hr):")
+            lines.append("🔥 *HOTTEST* (velocity %/hr):")
             for m in hot_markets[:5]:
-                title = m.get("title", "Unknown")[:35]
+                title = _escape_markdown(m.get("title", "Unknown")[:35])
+                slug = m.get("slug", "")
                 vel_pct = m["velocity_pct"]
                 velocity = m["velocity"]
                 vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
                 emoji = "🔥🔥" if vel_pct >= 20 else ("🔥" if vel_pct >= 10 else "")
-                lines.append(f"• {title}")
+                lines.append(f"• [{title}](https://polymarket.com/event/{slug})")
                 lines.append(f"  {vel_str} ({vel_pct:.1f}%/hr) {emoji}")
             lines.append("")
 
@@ -344,17 +401,17 @@ async def run_daily_digest(app: Application) -> dict:
         losers = [m for m in movers if m["price_change"] < 0][:3]
 
         if gainers or losers:
-            lines.append("📊 MOVERS (24h):")
-            if gainers:
-                for m in gainers:
-                    title = m.get("title", "Unknown")[:30]
-                    emoji = "🚀" if m["price_change"] >= 15 else "⬆️"
-                    lines.append(f"• {emoji} {title} (+{m['price_change']:.0f}%)")
-            if losers:
-                for m in losers:
-                    title = m.get("title", "Unknown")[:30]
-                    emoji = "💀" if m["price_change"] <= -15 else "⬇️"
-                    lines.append(f"• {emoji} {title} ({m['price_change']:.0f}%)")
+            lines.append("📊 *MOVERS* (24h):")
+            for m in gainers:
+                title = _escape_markdown(m.get("title", "Unknown")[:30])
+                slug = m.get("slug", "")
+                emoji = "🚀" if m["price_change"] >= 15 else "⬆️"
+                lines.append(f"• {emoji} [{title}](https://polymarket.com/event/{slug}) (+{m['price_change']:.0f}%)")
+            for m in losers:
+                title = _escape_markdown(m.get("title", "Unknown")[:30])
+                slug = m.get("slug", "")
+                emoji = "💀" if m["price_change"] <= -15 else "⬇️"
+                lines.append(f"• {emoji} [{title}](https://polymarket.com/event/{slug}) ({m['price_change']:.0f}%)")
             lines.append("")
 
         # 3. VOLUME SURGE (biggest 24h growth %)
@@ -367,21 +424,23 @@ async def run_daily_digest(app: Application) -> dict:
                 volume_24h_ago = total_volume - delta_24h
                 if volume_24h_ago > 0:
                     growth_pct = delta_24h / volume_24h_ago * 100
-                    if growth_pct >= 25:  # At least 25% growth
+                    if growth_pct >= 25:
                         volume_surge.append({**e, "delta_24h": delta_24h, "growth_pct": growth_pct})
         volume_surge.sort(key=lambda x: x["growth_pct"], reverse=True)
 
         if volume_surge[:5]:
-            lines.append("💰 VOLUME SURGE (24h):")
+            lines.append("💰 *VOLUME SURGE* (24h):")
             for m in volume_surge[:5]:
-                title = m.get("title", "Unknown")[:30]
+                title = _escape_markdown(m.get("title", "Unknown")[:30])
+                slug = m.get("slug", "")
                 delta = m["delta_24h"]
                 growth = m["growth_pct"]
                 delta_str = f"+${delta/1000:.0f}K" if delta >= 1000 else f"+${delta:.0f}"
-                lines.append(f"• {title} ({delta_str}, +{growth:.0f}%)")
+                lines.append(f"• [{title}](https://polymarket.com/event/{slug})")
+                lines.append(f"  {delta_str} (+{growth:.0f}%)")
             lines.append("")
 
-        lines.append("Use /hot, /movers, /discover for full lists")
+        lines.append("Use /hot, /movers, /discover, /new for full lists")
 
         message = "\n".join(lines)
 
@@ -391,6 +450,7 @@ async def run_daily_digest(app: Application) -> dict:
                 await app.bot.send_message(
                     chat_id=user["telegram_id"],
                     text=message,
+                    parse_mode="Markdown",
                     disable_web_page_preview=True
                 )
                 stats["users_sent"] += 1

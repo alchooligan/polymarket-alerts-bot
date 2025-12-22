@@ -91,6 +91,7 @@ SPAM_PHRASES = [
 # Sports/esports slug patterns to exclude (no edge on sports betting)
 SPORTS_SLUG_PATTERNS = [
     "nfl-", "nba-", "nhl-", "mlb-", "mls-",
+    "afc-", "nfc-",  # NFL conferences
     "epl-", "uefa-", "fifa-", "cfb-", "ncaa-",
     "boxing-", "ufc-", "mma-", "wwe-",
     "dota-", "csgo-", "lol-", "valorant-", "esport",
@@ -101,11 +102,14 @@ SPORTS_SLUG_PATTERNS = [
 # Sports-related title patterns
 SPORTS_TITLE_KEYWORDS = [
     "NFL", "NBA", "NHL", "MLB", "MLS",
+    "AFC North", "AFC South", "AFC East", "AFC West",  # NFL divisions
+    "NFC North", "NFC South", "NFC East", "NFC West",  # NFL divisions
     "Premier League", "Champions League", "La Liga", "Serie A",
     "Super Bowl", "World Series", "Stanley Cup", "Finals",
     "vs.", " vs ", "match", "game ",
     "UFC", "boxing", "fight",
     "Dota", "CS:GO", "League of Legends", "Valorant",
+    "Playoff", "playoffs", "Division Winner", "Conference Winner",
 ]
 
 # Category filters - maps user-friendly names to tag/slug patterns
