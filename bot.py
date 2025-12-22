@@ -714,9 +714,14 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         # Get ALL markets from API (Polymarket has ~2000-3000 active)
-        events = await get_all_markets_paginated(target_count=10000, include_spam=False)
-        events = filter_sports(events)
-        events = filter_resolved(events)
+        all_events = await get_all_markets_paginated(target_count=10000, include_spam=False)
+        total_fetched = len(all_events)
+
+        events_no_sports = filter_sports(all_events)
+        sports_filtered = total_fetched - len(events_no_sports)
+
+        events = filter_resolved(events_no_sports)
+        resolved_filtered = len(events_no_sports) - len(events)
 
         now = datetime.now(timezone.utc)
         cutoff = now.timestamp() - (hours * 3600)
@@ -854,7 +859,9 @@ Sorted by volume — money flowing to fresh markets.
         if len(new_markets) > count:
             lines.append(f"+{len(new_markets) - count} more new markets")
 
-        lines.append(f"\n{len(new_markets)} new markets in last {time_label}.")
+        # Show filter breakdown
+        lines.append(f"\n{len(new_markets)} new in {time_label} (of {len(events)} eligible)")
+        lines.append(f"_Filtered: {sports_filtered} sports, {resolved_filtered} resolved_")
 
         message = "\n".join(lines).strip()
         await update.message.reply_text(message, parse_mode="Markdown", disable_web_page_preview=True)
