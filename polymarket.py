@@ -11,6 +11,7 @@ from config import (
     TAGS_ENDPOINT,
     PRICES_HISTORY_ENDPOINT,
     GAMMA_API_BASE,
+    DATA_API_BASE,
     SPAM_CRYPTO_TICKERS,
     SPAM_PRICE_KEYWORDS,
     SPAM_TIMEFRAME_KEYWORDS,
@@ -200,6 +201,59 @@ async def fetch_price_history(
     except httpx.HTTPError as e:
         print(f"Error fetching price history for {token_id}: {e}")
         return []
+
+
+async def fetch_recent_trades(limit: int = 100) -> list[dict]:
+    """
+    Fetch recent trades from the Polymarket Data API.
+    Returns trades sorted by timestamp descending (most recent first).
+
+    Args:
+        limit: Maximum number of trades to fetch
+
+    Returns:
+        List of trade dictionaries with fields like:
+        - id: trade ID
+        - asset: token/asset ID
+        - size: trade size in dollars
+        - price: execution price
+        - side: BUY or SELL
+        - timestamp: trade timestamp
+    """
+    url = f"{DATA_API_BASE}/trades"
+    params = {"limit": limit}
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        print(f"Error fetching trades: {e}")
+        return []
+
+
+async def fetch_market_by_asset(asset_id: str) -> Optional[dict]:
+    """
+    Fetch market info by asset/token ID.
+    Used to get event details for a trade.
+
+    Args:
+        asset_id: The token/asset ID from a trade
+
+    Returns:
+        Market dictionary or None
+    """
+    url = f"{GAMMA_API_BASE}/markets/{asset_id}"
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.json()
+    except httpx.HTTPError as e:
+        print(f"Error fetching market for asset {asset_id}: {e}")
+        return None
 
 
 def parse_outcome_prices(outcome_prices_str: str) -> dict[str, float]:

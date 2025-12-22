@@ -1101,10 +1101,17 @@ def build_settings_keyboard(user: dict) -> InlineKeyboardMarkup:
     alerts_enabled = user.get("new_markets_enabled", False)
     alerts_status = "ON" if alerts_enabled else "OFF"
 
+    whale_enabled = user.get("whale_alerts_enabled", True)
+    whale_status = "ON" if whale_enabled else "OFF"
+
     keyboard = [
         [InlineKeyboardButton(
             f"Push Alerts: {alerts_status}",
             callback_data="toggle_new_markets"
+        )],
+        [InlineKeyboardButton(
+            f"Whale Alerts ($50K+): {whale_status}",
+            callback_data="toggle_whale_alerts"
         )],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -1115,20 +1122,23 @@ async def settings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     telegram_user = update.effective_user
     user = get_or_create_user(telegram_user.id, telegram_user.username)
 
-    text = """Alert Settings
+    text = """*Alert Settings*
 
-Push alerts include:
-• Volume milestones ($100K+)
-• Discoveries (new markets with $25K+)
-• Closing soon (<12h with action)
+*Push Alerts* include:
+• Wakeup (market was quiet, now hot)
+• Fast Mover (price moved with volume)
+• Early Heat (new market gaining traction)
 • Watchlist price moves (5%+)
 
+*Whale Alerts* ($50K+ trades):
+• Large trade alerts (follow the money)
+• Mega whale alerts ($100K+)
+
 On-demand commands (no toggle needed):
-• /hot - velocity leaders
-• /underdogs - contrarian plays"""
+• /hot, /movers, /new, /top"""
 
     keyboard = build_settings_keyboard(user)
-    await update.message.reply_text(text, reply_markup=keyboard)
+    await update.message.reply_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1144,24 +1154,31 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         new_value = toggle_user_setting(telegram_user.id, "new_markets_enabled")
         status = "ON" if new_value else "OFF"
         logger.info(f"User {telegram_user.id} toggled alerts to {status}")
+    elif callback_data == "toggle_whale_alerts":
+        new_value = toggle_user_setting(telegram_user.id, "whale_alerts_enabled")
+        status = "ON" if new_value else "OFF"
+        logger.info(f"User {telegram_user.id} toggled whale alerts to {status}")
 
     # Refresh the keyboard with updated settings
     user = get_or_create_user(telegram_user.id, telegram_user.username)
     keyboard = build_settings_keyboard(user)
 
-    text = """Alert Settings
+    text = """*Alert Settings*
 
-Push alerts include:
-• Volume milestones ($100K+)
-• Discoveries (new markets with $25K+)
-• Closing soon (<12h with action)
+*Push Alerts* include:
+• Wakeup (market was quiet, now hot)
+• Fast Mover (price moved with volume)
+• Early Heat (new market gaining traction)
 • Watchlist price moves (5%+)
 
-On-demand commands (no toggle needed):
-• /hot - velocity leaders
-• /underdogs - contrarian plays"""
+*Whale Alerts* ($50K+ trades):
+• Large trade alerts (follow the money)
+• Mega whale alerts ($100K+)
 
-    await query.edit_message_text(text, reply_markup=keyboard)
+On-demand commands (no toggle needed):
+• /hot, /movers, /new, /top"""
+
+    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="Markdown")
 
 
 async def watch_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

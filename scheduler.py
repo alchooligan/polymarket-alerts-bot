@@ -22,9 +22,11 @@ from config import (
     MARKETS_TO_SCAN,
     DAILY_DIGEST_HOUR,
     DAILY_DIGEST_MINUTE,
+    WHALE_TRADE_MIN,
 )
 from database import (
     get_all_users_with_alerts_enabled,
+    get_users_with_whale_alerts,
     log_alert,
     save_volume_snapshots_bulk,
     save_price_snapshots_bulk,
@@ -41,11 +43,13 @@ from alerts import (
     check_fast_mover_alerts,
     check_early_heat_alerts,
     check_new_launch_alerts,
+    check_whale_trades,
     # V2 Formatters
     format_bundled_wakeups,
     format_bundled_fast_movers,
     format_bundled_early_heat,
     format_bundled_new_launches,
+    format_bundled_whale_alerts,
     _escape_markdown,
 )
 
@@ -99,6 +103,7 @@ async def run_alert_cycle(app: Application) -> dict:
         "early_heat": 0,
         "new_launches": 0,
         "watchlist": 0,
+        "whale_trades": 0,
         "alerts_sent": 0,
     }
 
@@ -276,6 +281,27 @@ YES: {last_price:.0f}% → {current_price:.0f}% ({change_str})"""
 
                 # Update the stored price
                 update_watchlist_price(user_id, slug, current_price)
+
+    # ==========================================
+    # ALERT 6: Whale Trades ($50K+ trades)
+    # ==========================================
+    whale_users = get_users_with_whale_alerts()
+    if whale_users:
+        try:
+            logger.info("Checking whale trade alerts...")
+            whales = await check_whale_trades(min_size=WHALE_TRADE_MIN, limit=100)
+            stats["whale_trades"] = len(whales)
+
+            if whales:
+                message = format_bundled_whale_alerts(whales)
+
+                for user in whale_users:
+                    user_id = user["telegram_id"]
+                    sent = await send_alert_to_user(app, user_id, message, "whale_bundle", None)
+                    if sent:
+                        stats["alerts_sent"] += 1
+        except Exception as e:
+            logger.error(f"Error in whale trade alerts: {e}")
 
     logger.info(f"Alert cycle complete: {stats}")
     return stats

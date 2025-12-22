@@ -28,9 +28,16 @@ def init_database() -> None:
             username TEXT,
             new_markets_enabled INTEGER DEFAULT 1,
             big_moves_enabled INTEGER DEFAULT 1,
+            whale_alerts_enabled INTEGER DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Add whale_alerts_enabled column if it doesn't exist (migration)
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN whale_alerts_enabled INTEGER DEFAULT 1")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
 
     # User category preferences (many-to-many)
     # If user has no rows here, they get ALL categories
@@ -168,6 +175,28 @@ def init_database() -> None:
     cursor.execute("""
         CREATE INDEX IF NOT EXISTS idx_volume_snapshots_slug_time
         ON volume_snapshots(event_slug, recorded_at)
+    """)
+
+    # Whale trades - track large trades we've seen
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS whale_trades (
+            trade_id TEXT PRIMARY KEY,
+            event_slug TEXT NOT NULL,
+            asset_id TEXT,
+            size REAL NOT NULL,
+            price REAL,
+            side TEXT,
+            outcome TEXT,
+            market_title TEXT,
+            trade_timestamp TEXT,
+            alerted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Index for cleanup queries
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_whale_trades_timestamp
+        ON whale_trades(alerted_at)
     """)
 
     conn.commit()
@@ -978,6 +1007,114 @@ def get_price_deltas_bulk(event_slugs: list[str], hours: int = 6) -> dict[str, d
 
     conn.close()
     return results
+
+
+# ============================================
+# Whale trade functions
+# ============================================
+
+def is_whale_trade_seen(trade_id: str) -> bool:
+    """Check if we've already recorded this trade."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM whale_trades WHERE trade_id = ?", (trade_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
+
+
+def record_whale_trade(
+    trade_id: str,
+    event_slug: str,
+    size: float,
+    price: float = None,
+    side: str = None,
+    outcome: str = None,
+    market_title: str = None,
+    asset_id: str = None,
+    trade_timestamp: str = None,
+) -> None:
+    """Record a whale trade we've alerted about."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """INSERT OR IGNORE INTO whale_trades
+           (trade_id, event_slug, asset_id, size, price, side, outcome, market_title, trade_timestamp)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (trade_id, event_slug, asset_id, size, price, side, outcome, market_title, trade_timestamp)
+    )
+    conn.commit()
+    conn.close()
+
+
+def record_whale_trades_bulk(trades: list[dict]) -> None:
+    """Record multiple whale trades at once."""
+    if not trades:
+        return
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    for t in trades:
+        cursor.execute(
+            """INSERT OR IGNORE INTO whale_trades
+               (trade_id, event_slug, asset_id, size, price, side, outcome, market_title, trade_timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                t.get("trade_id"),
+                t.get("event_slug"),
+                t.get("asset_id"),
+                t.get("size"),
+                t.get("price"),
+                t.get("side"),
+                t.get("outcome"),
+                t.get("market_title"),
+                t.get("trade_timestamp"),
+            )
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_unseen_trade_ids(trade_ids: list[str]) -> list[str]:
+    """Given a list of trade IDs, return only the ones we haven't seen."""
+    if not trade_ids:
+        return []
+
+    conn = get_connection()
+    cursor = conn.cursor()
+    placeholders = ",".join("?" * len(trade_ids))
+    cursor.execute(
+        f"SELECT trade_id FROM whale_trades WHERE trade_id IN ({placeholders})",
+        trade_ids
+    )
+    seen = {row["trade_id"] for row in cursor.fetchall()}
+    conn.close()
+
+    return [tid for tid in trade_ids if tid not in seen]
+
+
+def cleanup_old_whale_trades(days: int = 30) -> int:
+    """Delete whale trade records older than X days. Returns count deleted."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM whale_trades WHERE alerted_at < datetime('now', ?)",
+        (f"-{days} days",)
+    )
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+
+def get_users_with_whale_alerts() -> list[dict]:
+    """Get all users who have whale alerts enabled."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE whale_alerts_enabled = 1")
+    rows = cursor.fetchall()
+    conn.close()
+    return [dict(row) for row in rows]
 
 
 # ============================================

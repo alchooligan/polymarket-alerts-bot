@@ -51,6 +51,13 @@ VELOCITY_THRESHOLDS = [
 CLOSING_SOON_HOURS = 12  # Alert for markets closing within 12 hours
 CLOSING_SOON_MIN_VELOCITY = 5_000  # Minimum $5K/hr velocity
 
+# Whale trade thresholds (in dollars)
+WHALE_TRADE_MIN = 50_000      # $50K minimum to alert
+WHALE_TRADE_MEGA = 100_000    # $100K for mega whale alert
+
+# Data API endpoint for trades
+DATA_API_BASE = "https://data-api.polymarket.com"
+
 # Alert limits per cycle (safety net to prevent spam)
 ALERT_CAP_PER_CYCLE = 10  # Max individual alerts per type per cycle
 MARKETS_TO_SCAN = 2000  # Fetch all markets (Polymarket has ~1000-2000 active)

@@ -1813,6 +1813,216 @@ def format_bundled_new_launches(alerts: list[dict]) -> str:
 
 
 # ============================================
+# WHALE TRADE ALERTS
+# ============================================
+
+async def check_whale_trades(
+    min_size: float = 50_000,
+    limit: int = 100,
+) -> list[dict]:
+    """
+    Check for large trades ($50K+) that we haven't alerted about.
+
+    Args:
+        min_size: Minimum trade size in dollars
+        limit: Number of recent trades to fetch
+
+    Returns:
+        List of whale trades to alert about
+    """
+    from polymarket import fetch_recent_trades, fetch_market_by_asset
+    from database import get_unseen_trade_ids, record_whale_trades_bulk
+    from config import WHALE_TRADE_MIN, WHALE_TRADE_MEGA
+
+    # Fetch recent trades
+    trades = await fetch_recent_trades(limit=limit)
+
+    if not trades:
+        return []
+
+    # Filter for large trades
+    large_trades = []
+    for t in trades:
+        # Get trade size - try different field names
+        size = 0
+        if "size" in t:
+            try:
+                size = float(t["size"])
+            except (ValueError, TypeError):
+                pass
+        elif "amount" in t:
+            try:
+                size = float(t["amount"])
+            except (ValueError, TypeError):
+                pass
+
+        if size >= min_size:
+            large_trades.append(t)
+
+    if not large_trades:
+        return []
+
+    # Get trade IDs and filter unseen
+    trade_ids = [t.get("id") or t.get("trade_id") or str(hash(str(t))) for t in large_trades]
+    unseen_ids = set(get_unseen_trade_ids(trade_ids))
+
+    # Filter to only unseen trades
+    new_whale_trades = []
+    for t in large_trades:
+        trade_id = t.get("id") or t.get("trade_id") or str(hash(str(t)))
+        if trade_id not in unseen_ids:
+            continue
+
+        # Get market info for this trade
+        asset_id = t.get("asset") or t.get("asset_id") or t.get("token_id")
+        market_info = None
+        if asset_id:
+            market_info = await fetch_market_by_asset(asset_id)
+
+        # Build whale trade record
+        size = float(t.get("size", 0) or t.get("amount", 0))
+        price = float(t.get("price", 0)) * 100 if t.get("price") else 0
+
+        # Determine side and outcome
+        side = t.get("side", "").upper()
+        outcome = t.get("outcome", "")
+        if not outcome:
+            # Try to infer from outcome_index
+            outcome_idx = t.get("outcome_index", t.get("outcomeIndex"))
+            if outcome_idx is not None:
+                outcome = "YES" if str(outcome_idx) == "0" else "NO"
+
+        # Get event slug and title
+        event_slug = ""
+        market_title = ""
+        total_volume = 0
+
+        if market_info:
+            event_slug = market_info.get("slug", "")
+            market_title = market_info.get("question", "") or market_info.get("title", "")
+            total_volume = float(market_info.get("volume", 0) or 0)
+
+            # Check if sports/spam
+            if is_sports_market({"slug": event_slug, "title": market_title}):
+                continue
+
+        # Calculate trade as % of volume
+        pct_of_volume = (size / total_volume * 100) if total_volume > 0 else 0
+
+        # Is this mega whale?
+        is_mega = size >= WHALE_TRADE_MEGA
+
+        whale_trade = {
+            "trade_id": trade_id,
+            "event_slug": event_slug,
+            "asset_id": asset_id,
+            "size": size,
+            "price": price,
+            "side": side,
+            "outcome": outcome,
+            "market_title": market_title,
+            "total_volume": total_volume,
+            "pct_of_volume": pct_of_volume,
+            "is_mega": is_mega,
+            "trade_timestamp": t.get("timestamp", ""),
+        }
+
+        new_whale_trades.append(whale_trade)
+
+    # Record all whale trades we're about to alert
+    if new_whale_trades:
+        record_whale_trades_bulk(new_whale_trades)
+
+    return new_whale_trades
+
+
+def format_whale_alert(trade: dict) -> str:
+    """Format a whale trade alert for Telegram."""
+    title = _escape_markdown(trade.get("market_title", "Unknown")[:50])
+    slug = trade.get("event_slug", "")
+    size = trade.get("size", 0)
+    price = trade.get("price", 0)
+    side = trade.get("side", "BUY")
+    outcome = trade.get("outcome", "YES")
+    pct_of_volume = trade.get("pct_of_volume", 0)
+    is_mega = trade.get("is_mega", False)
+
+    size_str = f"${size/1000:.0f}K" if size >= 1000 else f"${size:.0f}"
+    emoji = "🐋🐋" if is_mega else "🐋"
+    label = "Mega Whale" if is_mega else "Whale Trade"
+
+    lines = [f"{emoji} *{label}*", ""]
+
+    if slug:
+        lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+    else:
+        lines.append(title)
+
+    lines.append("")
+    lines.append(f"{size_str} {side} {outcome} at {price:.0f}%")
+
+    if pct_of_volume > 0:
+        lines.append(f"Trade size: {pct_of_volume:.1f}% of market volume")
+
+    return "\n".join(lines)
+
+
+def format_bundled_whale_alerts(trades: list[dict]) -> str:
+    """Format multiple whale trades into bundled message."""
+    if not trades:
+        return ""
+
+    # Separate mega whales from regular whales
+    mega = [t for t in trades if t.get("is_mega")]
+    regular = [t for t in trades if not t.get("is_mega")]
+
+    lines = []
+
+    if mega:
+        lines.append("🐋🐋 *Mega Whales*")
+        lines.append("")
+        for t in mega:
+            title = _escape_markdown(t.get("market_title", "Unknown")[:40])
+            slug = t.get("event_slug", "")
+            size = t.get("size", 0)
+            side = t.get("side", "BUY")
+            outcome = t.get("outcome", "YES")
+            price = t.get("price", 0)
+            pct = t.get("pct_of_volume", 0)
+
+            size_str = f"${size/1000:.0f}K"
+            if slug:
+                lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+            else:
+                lines.append(title)
+            lines.append(f"{size_str} {side} {outcome} at {price:.0f}% ({pct:.1f}% of volume)")
+            lines.append("")
+
+    if regular:
+        if mega:
+            lines.append("")
+        lines.append("🐋 *Whale Trades*")
+        lines.append("")
+        for t in regular:
+            title = _escape_markdown(t.get("market_title", "Unknown")[:40])
+            slug = t.get("event_slug", "")
+            size = t.get("size", 0)
+            side = t.get("side", "BUY")
+            outcome = t.get("outcome", "YES")
+            price = t.get("price", 0)
+
+            size_str = f"${size/1000:.0f}K"
+            if slug:
+                lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+            else:
+                lines.append(title)
+            lines.append(f"{size_str} {side} {outcome} at {price:.0f}%")
+            lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+# ============================================
 # Test function - run this file directly to test
 # ============================================
 
