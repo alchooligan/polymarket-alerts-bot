@@ -270,6 +270,68 @@ def parse_outcomes_with_names(market: dict) -> list[dict]:
     return outcomes
 
 
+def _extract_outcome_name(question: str, event_title: str) -> str:
+    """
+    Extract a short, meaningful outcome name from a market question.
+
+    Examples:
+    - "Will Tim Cook be out as Apple CEO before 2027?" → "Tim Cook"
+    - "Will the highest temperature be 40-45°F?" → "40-45°F"
+    - "Will Trump release the Epstein files by January 20?" → "Jan 20"
+    """
+    import re
+
+    q = question.strip().rstrip("?")
+
+    # Remove "Will " prefix
+    if q.lower().startswith("will "):
+        q = q[5:]
+
+    # Pattern 1: Look for "by [DATE]" at the end - extract the date
+    by_match = re.search(r'\bby\s+(.+)$', q, re.IGNORECASE)
+    if by_match:
+        date_part = by_match.group(1).strip()
+        # Shorten month names
+        date_part = date_part.replace("January", "Jan").replace("February", "Feb")
+        date_part = date_part.replace("March", "Mar").replace("April", "Apr")
+        date_part = date_part.replace("September", "Sep").replace("October", "Oct")
+        date_part = date_part.replace("November", "Nov").replace("December", "Dec")
+        # Remove year if present and date is short enough
+        date_part = re.sub(r',?\s*202\d', '', date_part).strip()
+        if len(date_part) <= 15:
+            return date_part
+
+    # Pattern 2: Look for "be X" patterns for temperature/number ranges
+    be_match = re.search(r'\bbe\s+(\d+[-–]\d+[°]?[FC]?|\d+\+?[°]?[FC]?)', q)
+    if be_match:
+        return be_match.group(1)
+
+    # Pattern 3: Person names - "X be out as" or "X out as" or just "X be"
+    # Extract first part before "be out", "out as", "be fired", etc.
+    out_match = re.search(r'^(.+?)\s+(?:be\s+)?(?:out|fired|leave|resign|step down)', q, re.IGNORECASE)
+    if out_match:
+        name = out_match.group(1).strip()
+        # Remove "the" prefix
+        if name.lower().startswith("the "):
+            name = name[4:]
+        if len(name) <= 20:
+            return name
+
+    # Pattern 4: Just take the first meaningful words (skip "the")
+    words = q.split()
+    if words and words[0].lower() == "the":
+        words = words[1:]
+
+    # Take first 2-3 words that seem like a name/identifier
+    result = " ".join(words[:3])
+
+    # Truncate if still too long
+    if len(result) > 18:
+        result = result[:15] + "..."
+
+    return result
+
+
 def is_price_spam(title: str) -> bool:
     """
     Check if a market title looks like crypto price prediction spam.
@@ -463,27 +525,12 @@ async def get_unique_events(limit: int = 100, include_spam: bool = False) -> lis
             if is_multi_outcome:
                 question = market.get("question", "")
                 if question and question != market["title"]:
-                    # Extract short name from question (remove "Will X happen?" patterns)
-                    outcome_name = question
-                    # Try to extract just the key part
-                    if question.lower().startswith("will "):
-                        outcome_name = question[5:]
-                        # Remove trailing "?" and common suffixes
-                        outcome_name = outcome_name.rstrip("?").strip()
-                        # If it ends with common patterns, trim
-                        for suffix in [" happen", " be ", " win", " occur"]:
-                            if suffix in outcome_name.lower():
-                                idx = outcome_name.lower().find(suffix)
-                                outcome_name = outcome_name[:idx].strip()
-                                break
-                    # Truncate long names
-                    if len(outcome_name) > 25:
-                        outcome_name = outcome_name[:22] + "..."
-
-                    event_map[slug]["event_outcomes"].append({
-                        "name": outcome_name,
-                        "price": market["yes_price"],
-                    })
+                    outcome_name = _extract_outcome_name(question, market["title"])
+                    if outcome_name:
+                        event_map[slug]["event_outcomes"].append({
+                            "name": outcome_name,
+                            "price": market["yes_price"],
+                        })
 
             # Keep the highest YES price
             if market["yes_price"] > event_map[slug]["yes_price"]:
@@ -555,22 +602,12 @@ async def get_popular_markets(limit: int = 100, include_spam: bool = False) -> l
             if is_multi_outcome:
                 question = market.get("question", "")
                 if question and question != market["title"]:
-                    outcome_name = question
-                    if question.lower().startswith("will "):
-                        outcome_name = question[5:]
-                        outcome_name = outcome_name.rstrip("?").strip()
-                        for suffix in [" happen", " be ", " win", " occur"]:
-                            if suffix in outcome_name.lower():
-                                idx = outcome_name.lower().find(suffix)
-                                outcome_name = outcome_name[:idx].strip()
-                                break
-                    if len(outcome_name) > 25:
-                        outcome_name = outcome_name[:22] + "..."
-
-                    event_map[slug]["event_outcomes"].append({
-                        "name": outcome_name,
-                        "price": market["yes_price"],
-                    })
+                    outcome_name = _extract_outcome_name(question, market["title"])
+                    if outcome_name:
+                        event_map[slug]["event_outcomes"].append({
+                            "name": outcome_name,
+                            "price": market["yes_price"],
+                        })
 
             if market["yes_price"] > event_map[slug]["yes_price"]:
                 event_map[slug]["yes_price"] = market["yes_price"]
@@ -647,22 +684,12 @@ async def get_all_markets_paginated(
             if is_multi_outcome:
                 question = market.get("question", "")
                 if question and question != market["title"]:
-                    outcome_name = question
-                    if question.lower().startswith("will "):
-                        outcome_name = question[5:]
-                        outcome_name = outcome_name.rstrip("?").strip()
-                        for suffix in [" happen", " be ", " win", " occur"]:
-                            if suffix in outcome_name.lower():
-                                idx = outcome_name.lower().find(suffix)
-                                outcome_name = outcome_name[:idx].strip()
-                                break
-                    if len(outcome_name) > 25:
-                        outcome_name = outcome_name[:22] + "..."
-
-                    event_map[slug]["event_outcomes"].append({
-                        "name": outcome_name,
-                        "price": market["yes_price"],
-                    })
+                    outcome_name = _extract_outcome_name(question, market["title"])
+                    if outcome_name:
+                        event_map[slug]["event_outcomes"].append({
+                            "name": outcome_name,
+                            "price": market["yes_price"],
+                        })
 
             # Keep the highest YES price
             if market["yes_price"] > event_map[slug]["yes_price"]:
