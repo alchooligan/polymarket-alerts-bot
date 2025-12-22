@@ -1362,6 +1362,10 @@ async def check_wakeup_alerts(
                 "velocity_now": velocity_1h,
                 "velocity_pct_now": velocity_pct_now,
                 "tags": event.get("tags", []),
+                "end_date": event.get("end_date"),
+                "is_multi_outcome": event.get("is_multi_outcome", False),
+                "event_outcomes": event.get("event_outcomes", []),
+                "outcomes": event.get("outcomes", []),
             })
 
     # Sort by current velocity (hottest first)
@@ -1440,6 +1444,10 @@ async def check_fast_mover_alerts(
                 "total_volume": total_volume,
                 "direction": "up" if price_change > 0 else "down",
                 "tags": event.get("tags", []),
+                "end_date": event.get("end_date"),
+                "is_multi_outcome": event.get("is_multi_outcome", False),
+                "event_outcomes": event.get("event_outcomes", []),
+                "outcomes": event.get("outcomes", []),
             })
 
     # Sort by absolute price change
@@ -1533,6 +1541,10 @@ async def check_early_heat_alerts(
             "velocity_pct": velocity_pct,
             "hours_ago": hours_ago,
             "tags": event.get("tags", []),
+            "end_date": event.get("end_date"),
+            "is_multi_outcome": event.get("is_multi_outcome", False),
+            "event_outcomes": event.get("event_outcomes", []),
+            "outcomes": event.get("outcomes", []),
         })
 
     # Sort by velocity
@@ -1607,6 +1619,10 @@ async def check_new_launch_alerts(
             "total_volume": event.get("total_volume", 0),
             "hours_ago": hours_ago,
             "tags": event.get("tags", []),
+            "end_date": event.get("end_date"),
+            "is_multi_outcome": event.get("is_multi_outcome", False),
+            "event_outcomes": event.get("event_outcomes", []),
+            "outcomes": event.get("outcomes", []),
         })
 
     # Sort by most recent first
@@ -1719,20 +1735,44 @@ def format_bundled_wakeups(alerts: list[dict]) -> str:
     lines = ["⚡ *Markets Waking Up*", ""]
 
     for a in alerts:
-        title = _escape_markdown(a.get("title", "Unknown")[:40])
+        title = _escape_markdown(a.get("title", "Unknown")[:45])
         slug = a.get("slug", "")
         velocity_now = a.get("velocity_now", 0)
         velocity_pct_now = a.get("velocity_pct_now", 0)
         total_volume = a.get("total_volume", 0)
+        end_date = a.get("end_date")
+        event_outcomes = a.get("event_outcomes", [])
+        is_multi = a.get("is_multi_outcome", False)
 
         vol_str = _format_volume(total_volume)
         vel_str = f"+${velocity_now/1000:.0f}K/hr" if velocity_now >= 1000 else f"+${velocity_now:.0f}/hr"
         vel_emoji = " 🔥🔥" if velocity_pct_now >= 20 else " 🔥"
-        odds_str = _format_odds(a)
 
         lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+
+        # Show end date if available
+        if end_date:
+            try:
+                from datetime import datetime
+                if isinstance(end_date, str):
+                    dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                    lines.append(f"📅 Closes: {dt.strftime('%b %d')}")
+            except:
+                pass
+
         lines.append(f"Was quiet → Now: {vel_str} ({velocity_pct_now:.1f}%/hr){vel_emoji}")
-        lines.append(f"Volume: {vol_str} | {odds_str}")
+        lines.append(f"Volume: {vol_str}")
+
+        # Show outcomes
+        if is_multi and event_outcomes:
+            sorted_outcomes = sorted(event_outcomes, key=lambda x: x.get("price", 0), reverse=True)[:3]
+            outcome_strs = [f"{o['name'][:15]} {o['price']:.0f}%" for o in sorted_outcomes if o.get("name")]
+            if outcome_strs:
+                lines.append(f"Odds: {' · '.join(outcome_strs)}")
+        else:
+            odds_str = _format_odds(a)
+            lines.append(f"Odds: {odds_str}")
+
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -1746,19 +1786,42 @@ def format_bundled_fast_movers(alerts: list[dict]) -> str:
     lines = ["📈 *Fast Movers*", ""]
 
     for a in alerts:
-        title = _escape_markdown(a.get("title", "Unknown")[:40])
+        title = _escape_markdown(a.get("title", "Unknown")[:45])
         slug = a.get("slug", "")
         old_price = a.get("old_price", 0)
         current_price = a.get("current_price", 0)
         price_change = a.get("price_change", 0)
         volume_behind = a.get("volume_behind", 0)
+        end_date = a.get("end_date")
+        event_outcomes = a.get("event_outcomes", [])
+        is_multi = a.get("is_multi_outcome", False)
 
         change_str = f"+{price_change:.0f}%" if price_change > 0 else f"{price_change:.0f}%"
         vol_str = f"+${volume_behind/1000:.0f}K" if volume_behind >= 1000 else f"+${volume_behind:.0f}"
         emoji = "🚀" if price_change >= 15 else ("💀" if price_change <= -15 else ("⬆️" if price_change > 0 else "⬇️"))
 
         lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+
+        # Show end date if available
+        if end_date:
+            try:
+                from datetime import datetime
+                if isinstance(end_date, str):
+                    dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                    lines.append(f"📅 Closes: {dt.strftime('%b %d')}")
+            except:
+                pass
+
+        # Show price move
         lines.append(f"{emoji} {old_price:.0f}% → {current_price:.0f}% ({change_str}) | {vol_str} behind")
+
+        # Show top outcomes for multi-outcome markets
+        if is_multi and event_outcomes:
+            sorted_outcomes = sorted(event_outcomes, key=lambda x: x.get("price", 0), reverse=True)[:3]
+            outcome_strs = [f"{o['name'][:15]} {o['price']:.0f}%" for o in sorted_outcomes if o.get("name")]
+            if outcome_strs:
+                lines.append(f"Odds: {' · '.join(outcome_strs)}")
+
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -1778,16 +1841,40 @@ def format_bundled_early_heat(alerts: list[dict]) -> str:
         velocity = a.get("velocity", 0)
         velocity_pct = a.get("velocity_pct", 0)
         hours_ago = a.get("hours_ago", 0)
+        end_date = a.get("end_date")
+        event_outcomes = a.get("event_outcomes", [])
+        is_multi = a.get("is_multi_outcome", False)
 
         vol_str = _format_volume(total_volume)
         vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
         time_ago = f"{hours_ago:.0f}h ago" if hours_ago >= 1 else f"{hours_ago*60:.0f}m ago"
         vel_emoji = " 🔥🔥" if velocity_pct >= 20 else " 🔥"
-        odds_str = _format_odds(a)
 
         lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+
+        # Show end date if available
+        if end_date:
+            try:
+                from datetime import datetime
+                if isinstance(end_date, str):
+                    dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                    lines.append(f"📅 Closes: {dt.strftime('%b %d')}")
+            except:
+                pass
+
         lines.append(f"Launched: {time_ago} | {vol_str}")
-        lines.append(f"Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji} | {odds_str}")
+        lines.append(f"Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
+
+        # Show outcomes
+        if is_multi and event_outcomes:
+            sorted_outcomes = sorted(event_outcomes, key=lambda x: x.get("price", 0), reverse=True)[:3]
+            outcome_strs = [f"{o['name'][:15]} {o['price']:.0f}%" for o in sorted_outcomes if o.get("name")]
+            if outcome_strs:
+                lines.append(f"Odds: {' · '.join(outcome_strs)}")
+        else:
+            odds_str = _format_odds(a)
+            lines.append(f"Odds: {odds_str}")
+
         lines.append("")
 
     return "\n".join(lines).strip()
@@ -1803,10 +1890,34 @@ def format_bundled_new_launches(alerts: list[dict]) -> str:
     for a in alerts:
         title = _escape_markdown(a.get("title", "Unknown")[:40])
         slug = a.get("slug", "")
-        odds_str = _format_odds(a)
+        end_date = a.get("end_date")
+        event_outcomes = a.get("event_outcomes", [])
+        is_multi = a.get("is_multi_outcome", False)
 
         lines.append(f"[{title}](https://polymarket.com/event/{slug})")
-        lines.append(f"Just launched | {odds_str}")
+
+        # Show end date if available
+        if end_date:
+            try:
+                from datetime import datetime
+                if isinstance(end_date, str):
+                    dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                    lines.append(f"📅 Closes: {dt.strftime('%b %d')}")
+            except:
+                pass
+
+        # Show outcomes
+        if is_multi and event_outcomes:
+            sorted_outcomes = sorted(event_outcomes, key=lambda x: x.get("price", 0), reverse=True)[:3]
+            outcome_strs = [f"{o['name'][:15]} {o['price']:.0f}%" for o in sorted_outcomes if o.get("name")]
+            if outcome_strs:
+                lines.append(f"Odds: {' · '.join(outcome_strs)}")
+            else:
+                lines.append("Just launched")
+        else:
+            odds_str = _format_odds(a)
+            lines.append(f"Just launched | {odds_str}")
+
         lines.append("")
 
     return "\n".join(lines).strip()
