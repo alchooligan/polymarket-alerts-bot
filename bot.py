@@ -1756,6 +1756,68 @@ Run /seed to populate test data."""
         await update.message.reply_text(f"Error: {e}")
 
 
+async def testwhale_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Test whale alert detection.
+    Usage: /testwhale [min_size] - defaults to $1000 to see any trades
+    """
+    from alerts import check_whale_trades, format_whale_alert, format_bundled_whale_alerts
+
+    # Parse minimum size (default $1000 for testing)
+    min_size = 1000
+    for arg in context.args:
+        if arg.isdigit():
+            min_size = int(arg)
+            break
+
+    await update.message.reply_text(f"Checking for trades >= ${min_size:,}...")
+
+    try:
+        # Fetch trades with lower threshold for testing
+        trades = await check_whale_trades(min_size=min_size, limit=50)
+
+        if not trades:
+            await update.message.reply_text(
+                f"No trades >= ${min_size:,} found in recent trades.\n\n"
+                "This could mean:\n"
+                "1. API not returning trades\n"
+                "2. No large trades recently\n"
+                "3. All large trades already seen\n\n"
+                "Try /testwhale 100 to see smaller trades."
+            )
+            return
+
+        # Show what we found
+        lines = [f"Found {len(trades)} trades >= ${min_size:,}:\n"]
+
+        for i, t in enumerate(trades[:5], 1):
+            size = t.get("size", 0)
+            title = t.get("market_title", "Unknown")[:40]
+            side = t.get("side", "?")
+            outcome = t.get("outcome", "?")
+            price = t.get("price", 0)
+
+            size_str = f"${size/1000:.0f}K" if size >= 1000 else f"${size:.0f}"
+            lines.append(f"{i}. {size_str} {side} {outcome} @ {price:.0f}%")
+            lines.append(f"   {title}")
+            lines.append("")
+
+        if len(trades) > 5:
+            lines.append(f"+{len(trades) - 5} more trades")
+
+        # Show sample formatted alert
+        lines.append("\n--- Sample Alert Format ---")
+        lines.append(format_whale_alert(trades[0]))
+
+        await update.message.reply_text(
+            "\n".join(lines), parse_mode="Markdown", disable_web_page_preview=True
+        )
+
+    except Exception as e:
+        logger.error(f"Error in testwhale: {e}")
+        await update.message.reply_text(f"Error: {e}")
+
+
 async def main() -> None:
     """Start the bot."""
     # Check for token
@@ -1793,6 +1855,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("watchlist", watchlist_command))
     application.add_handler(CommandHandler("digest", digest_command))
     application.add_handler(CommandHandler("dbstatus", dbstatus_command))
+    application.add_handler(CommandHandler("testwhale", testwhale_command))
 
     # Add callback handler for inline buttons
     application.add_handler(CallbackQueryHandler(callback_handler))
