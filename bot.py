@@ -1799,9 +1799,9 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             lines.append(f"• Markets scanned: {stats.get('markets_scanned', 0)}")
             lines.append(f"• Wakeups found: {stats.get('wakeups', 0)}")
             lines.append(f"• Fast movers: {stats.get('fast_movers', 0)}")
+            lines.append(f"• Big swings: {stats.get('big_swings', 0)}")
             lines.append(f"• Early heat: {stats.get('early_heat', 0)}")
             lines.append(f"• New launches: {stats.get('new_launches', 0)}")
-            lines.append(f"• Vol milestones: {stats.get('volume_milestones', 0)}")
             lines.append(f"• Alerts sent: {stats.get('alerts_sent', 0)}")
 
         # Next runs

@@ -40,15 +40,15 @@ from alerts import (
     # V2 Alert functions
     check_wakeup_alerts,
     check_fast_mover_alerts,
+    check_big_swing_alerts,
     check_early_heat_alerts,
     check_new_launch_alerts,
-    check_volume_milestones,
     # V2 Formatters
     format_bundled_wakeups,
     format_bundled_fast_movers,
+    format_bundled_big_swings,
     format_bundled_early_heat,
     format_bundled_new_launches,
-    format_bundled_volume_milestones,
     _escape_markdown,
 )
 
@@ -125,9 +125,9 @@ async def run_alert_cycle(app: Application) -> dict:
         "markets_scanned": 0,
         "wakeups": 0,
         "fast_movers": 0,
+        "big_swings": 0,
         "early_heat": 0,
         "new_launches": 0,
-        "volume_milestones": 0,
         "watchlist": 0,
         "alerts_sent": 0,
     }
@@ -234,7 +234,41 @@ async def run_alert_cycle(app: Application) -> dict:
             logger.error(f"Error in fast mover alerts: {e}")
 
     # ==========================================
-    # ALERT 3: Early Heat (new market + traction)
+    # ALERT 3: Big Swings (15%+ in 1 hour)
+    # ==========================================
+    if alert_users:
+        try:
+            logger.info("Checking big swing alerts...")
+            swings = await check_big_swing_alerts(target_count=MARKETS_TO_SCAN)
+            stats["big_swings"] = len(swings)
+
+            if swings:
+                if use_channel:
+                    to_send = swings[:ALERT_CAP_PER_CYCLE]
+                    message = format_bundled_big_swings(to_send)
+                    sent = await send_alert_to_channel(app, message, "big_swing_bundle")
+                    if sent:
+                        stats["alerts_sent"] += 1
+                else:
+                    for user in alert_users:
+                        user_id = user["telegram_id"]
+                        user_swings = filter_unseen_markets(user_id, swings, "big_swing")
+
+                        if not user_swings:
+                            continue
+
+                        to_send = user_swings[:ALERT_CAP_PER_CYCLE]
+                        message = format_bundled_big_swings(to_send)
+
+                        sent = await send_alert_to_user(app, user_id, message, "big_swing_bundle", None)
+                        if sent:
+                            stats["alerts_sent"] += 1
+                            mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "big_swing")
+        except Exception as e:
+            logger.error(f"Error in big swing alerts: {e}")
+
+    # ==========================================
+    # ALERT 4: Early Heat (new market + traction)
     # ==========================================
     if alert_users:
         try:
@@ -268,7 +302,7 @@ async def run_alert_cycle(app: Application) -> dict:
             logger.error(f"Error in early heat alerts: {e}")
 
     # ==========================================
-    # ALERT 4: New Launch (brand new markets)
+    # ALERT 5: New Launch (brand new markets)
     # ==========================================
     if alert_users:
         try:
@@ -300,40 +334,6 @@ async def run_alert_cycle(app: Application) -> dict:
                             mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "new_launch")
         except Exception as e:
             logger.error(f"Error in new launch alerts: {e}")
-
-    # ==========================================
-    # ALERT 5: Volume Milestones (crossed $100K, $250K, etc)
-    # ==========================================
-    if alert_users:
-        try:
-            logger.info("Checking volume milestones...")
-            milestones, discoveries = await check_volume_milestones(target_count=MARKETS_TO_SCAN)
-            stats["volume_milestones"] = len(milestones)
-
-            if milestones:
-                if use_channel:
-                    to_send = milestones[:ALERT_CAP_PER_CYCLE]
-                    message = format_bundled_volume_milestones(to_send)
-                    sent = await send_alert_to_channel(app, message, "volume_milestone_bundle")
-                    if sent:
-                        stats["alerts_sent"] += 1
-                else:
-                    for user in alert_users:
-                        user_id = user["telegram_id"]
-                        user_milestones = filter_unseen_markets(user_id, milestones, "volume_milestone")
-
-                        if not user_milestones:
-                            continue
-
-                        to_send = user_milestones[:ALERT_CAP_PER_CYCLE]
-                        message = format_bundled_volume_milestones(to_send)
-
-                        sent = await send_alert_to_user(app, user_id, message, "volume_milestone_bundle", None)
-                        if sent:
-                            stats["alerts_sent"] += 1
-                            mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "volume_milestone")
-        except Exception as e:
-            logger.error(f"Error in volume milestone alerts: {e}")
 
     # ==========================================
     # ALERT 6: Watchlist (price moves)

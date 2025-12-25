@@ -1530,6 +1530,82 @@ async def check_fast_mover_alerts(
     return movers
 
 
+async def check_big_swing_alerts(
+    target_count: int = 500,
+    price_threshold: float = 15.0,
+    hours: int = 1,
+) -> list[dict]:
+    """
+    Find markets with BIG price swings (15%+ in 1 hour).
+
+    Different from Fast Movers:
+    - Bigger threshold (15% vs 10%)
+    - Shorter window (1h vs 2h)
+    - No volume requirement - pure price action
+
+    This catches dramatic moves that might indicate breaking news.
+
+    Args:
+        target_count: How many markets to fetch
+        price_threshold: Minimum price change %
+        hours: Time window to check
+
+    Returns:
+        List of big swing markets
+    """
+    from database import get_volume_deltas_bulk, get_price_deltas_bulk
+
+    # Fetch markets
+    events = await get_all_markets_paginated(target_count=target_count, include_spam=False)
+    events = filter_noise(events)
+    events = filter_resolved(events)
+
+    slugs = [e.get("slug") for e in events if e.get("slug")]
+
+    # Get price deltas for 1h window
+    price_deltas = get_price_deltas_bulk(slugs, hours=hours)
+    velocity_1h = get_volume_deltas_bulk(slugs, hours=1)
+
+    swings = []
+
+    for event in events:
+        slug = event.get("slug")
+        total_volume = event.get("total_volume", 0)
+
+        if not slug:
+            continue
+
+        # Get price change
+        price_data = price_deltas.get(slug, {})
+        price_change = price_data.get("delta", 0)
+        old_price = price_data.get("old", 0)
+        current_price = event.get("yes_price", 0)
+
+        # Check threshold - pure price action, no volume requirement
+        if abs(price_change) >= price_threshold:
+            velocity = velocity_1h.get(slug, 0)
+            velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
+
+            swings.append({
+                "title": event.get("title"),
+                "slug": slug,
+                "old_price": old_price,
+                "current_price": current_price,
+                "price_change": price_change,
+                "velocity": velocity,
+                "velocity_pct": velocity_pct,
+                "total_volume": total_volume,
+                "direction": "up" if price_change > 0 else "down",
+                "tags": event.get("tags", []),
+                "end_date": event.get("end_date"),
+            })
+
+    # Sort by absolute price change (biggest swings first)
+    swings.sort(key=lambda x: abs(x["price_change"]), reverse=True)
+
+    return swings
+
+
 async def check_early_heat_alerts(
     target_count: int = 500,
     max_age_hours: int = 24,
@@ -1947,6 +2023,54 @@ def format_bundled_fast_movers(alerts: list[dict]) -> str:
             if outcome_strs:
                 lines.append(f"Odds: {' · '.join(outcome_strs)}")
 
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def format_bundled_big_swings(alerts: list[dict]) -> str:
+    """Format multiple big swing alerts into bundled message."""
+    if not alerts:
+        return ""
+
+    lines = ["🎢 *Big Swings* (15%+ in 1hr)", ""]
+
+    for a in alerts:
+        title = _escape_markdown(a.get("title", "Unknown")[:45])
+        slug = a.get("slug", "")
+        old_price = a.get("old_price", 0)
+        current_price = a.get("current_price", 0)
+        price_change = a.get("price_change", 0)
+        total_volume = a.get("total_volume", 0)
+        end_date = a.get("end_date")
+
+        change_str = f"+{price_change:.0f}%" if price_change > 0 else f"{price_change:.0f}%"
+        vol_str = _format_volume(total_volume)
+
+        # More dramatic emojis for big swings
+        if price_change >= 25:
+            emoji = "🚀🚀"
+        elif price_change >= 15:
+            emoji = "🚀"
+        elif price_change <= -25:
+            emoji = "💀💀"
+        else:
+            emoji = "💀"
+
+        lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+
+        # Show end date if available
+        if end_date:
+            try:
+                from datetime import datetime
+                if isinstance(end_date, str):
+                    dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
+                    lines.append(f"📅 Closes: {dt.strftime('%b %d')}")
+            except:
+                pass
+
+        # Show price move
+        lines.append(f"{emoji} {old_price:.0f}% → {current_price:.0f}% ({change_str}) | Vol: {vol_str}")
         lines.append("")
 
     return "\n".join(lines).strip()
