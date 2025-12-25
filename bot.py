@@ -1861,8 +1861,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         try:
             await context.bot.send_message(
                 chat_id=user["telegram_id"],
-                text=f"*Announcement*\n\n{message}",
-                parse_mode="Markdown"
+                text=f"📢 {message}"
             )
             sent_count += 1
         except Exception as e:
