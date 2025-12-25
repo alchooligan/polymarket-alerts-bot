@@ -66,6 +66,16 @@ MARKETS_TO_SCAN = 2000  # Fetch all markets (Polymarket has ~1000-2000 active)
 DAILY_DIGEST_HOUR = 9  # 9 AM UTC
 DAILY_DIGEST_MINUTE = 0
 
+# Group/Channel settings for public alerts
+# Set ALERT_CHANNEL_ID to send automated alerts to a channel/group instead of individual users
+# Format: "@channelname" or "-100xxxxxxxxxx" (group/channel ID)
+# Leave empty to use individual user alerts (default behavior)
+ALERT_CHANNEL_ID = os.getenv("ALERT_CHANNEL_ID", "")
+
+# Admin user IDs who can use /broadcast and other admin commands
+# Comma-separated list of Telegram user IDs
+ADMIN_IDS = [int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
+
 # Database - uses Railway persistent volume at /data, local fallback for dev
 import os
 DATABASE_PATH = "/data/bot_data.db" if os.path.exists("/data") else "bot_data.db"
@@ -95,6 +105,51 @@ SPAM_PHRASES = [
     "above or below",
 ]
 
+# Up/Down market patterns (stocks, indices, commodities, ETF flows)
+# These are coin-flip gambles with no edge
+UP_DOWN_PATTERNS = [
+    "Up or Down",
+    "up or down",
+    "Positive or Negative",  # ETF flows
+    "positive or negative",
+]
+
+UP_DOWN_SLUG_PATTERNS = [
+    "-up-or-down-",
+    "etf-flows-",
+    "bitcoin-etf-flows",
+    "ethereum-etf-flows",
+]
+
+# Stock/index tickers that often appear in up/down markets
+UP_DOWN_TICKERS = [
+    "(SPX)", "(NDX)", "(DJI)", "(NIK)",  # Indices
+    "(AAPL)", "(GOOGL)", "(MSFT)", "(AMZN)", "(NVDA)", "(META)", "(TSLA)",  # Mega caps
+    "(GC)", "(SI)", "(CL)",  # Commodities (gold, silver, crude)
+]
+
+# Weather market patterns - no edge, just noise
+WEATHER_PATTERNS = [
+    "Highest temperature",
+    "highest temperature",
+    "Lowest temperature",
+    "lowest temperature",
+    "temperature in",
+    "Precipitation in",
+    "precipitation in",
+    "Weather in",
+    "weather in",
+    "°F", "°C",  # Temperature symbols
+]
+
+WEATHER_SLUG_PATTERNS = [
+    "highest-temperature-",
+    "lowest-temperature-",
+    "temperature-in-",
+    "precipitation-",
+    "weather-",
+]
+
 # Sports/esports slug patterns to exclude (no edge on sports betting)
 SPORTS_SLUG_PATTERNS = [
     "nfl-", "nba-", "nhl-", "mlb-", "mls-",
@@ -104,6 +159,7 @@ SPORTS_SLUG_PATTERNS = [
     "dota-", "csgo-", "lol-", "valorant-", "esport",
     "f1-", "nascar-", "tennis-", "golf-", "pga-",
     "olympics-", "world-cup-", "super-bowl-",
+    "fantasy-football", "fantasy-",  # Fantasy sports
 ]
 
 # Sports-related title patterns
@@ -117,6 +173,8 @@ SPORTS_TITLE_KEYWORDS = [
     "UFC", "boxing", "fight",
     "Dota", "CS:GO", "League of Legends", "Valorant",
     "Playoff", "playoffs", "Division Winner", "Conference Winner",
+    "Fantasy Football", "Top Kicker", "Top Quarterback", "Top Running Back",
+    "Top Wide Receiver", "Top Tight End",  # Fantasy positions
 ]
 
 # Category filters - maps user-friendly names to tag/slug patterns

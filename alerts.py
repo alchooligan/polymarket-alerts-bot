@@ -14,6 +14,11 @@ from config import (
     SPORTS_SLUG_PATTERNS,
     SPORTS_TITLE_KEYWORDS,
     CATEGORY_FILTERS,
+    UP_DOWN_PATTERNS,
+    UP_DOWN_SLUG_PATTERNS,
+    UP_DOWN_TICKERS,
+    WEATHER_PATTERNS,
+    WEATHER_SLUG_PATTERNS,
 )
 from polymarket import get_unique_events, get_popular_markets, get_all_markets_paginated
 from database import (
@@ -77,6 +82,74 @@ def is_sports_market(event: dict) -> bool:
 def filter_sports(events: list[dict]) -> list[dict]:
     """Filter out sports/esports markets from a list."""
     return [e for e in events if not is_sports_market(e)]
+
+
+def is_updown_market(event: dict) -> bool:
+    """
+    Check if a market is an Up/Down prediction (stocks, indices, ETF flows).
+    These are essentially coin flips with no edge.
+    """
+    slug = event.get("slug", "").lower()
+    title = event.get("title", "")
+
+    # Check slug patterns
+    for pattern in UP_DOWN_SLUG_PATTERNS:
+        if pattern.lower() in slug:
+            return True
+
+    # Check title patterns
+    for pattern in UP_DOWN_PATTERNS:
+        if pattern.lower() in title.lower():
+            return True
+
+    # Check for stock tickers in title
+    for ticker in UP_DOWN_TICKERS:
+        if ticker in title:
+            return True
+
+    return False
+
+
+def filter_updown(events: list[dict]) -> list[dict]:
+    """Filter out Up/Down markets (stocks, indices, ETF flows)."""
+    return [e for e in events if not is_updown_market(e)]
+
+
+def is_weather_market(event: dict) -> bool:
+    """
+    Check if a market is a weather prediction (temperature, precipitation).
+    These are noise with no informational edge.
+    """
+    slug = event.get("slug", "").lower()
+    title = event.get("title", "")
+
+    # Check slug patterns
+    for pattern in WEATHER_SLUG_PATTERNS:
+        if pattern.lower() in slug:
+            return True
+
+    # Check title patterns
+    for pattern in WEATHER_PATTERNS:
+        if pattern.lower() in title.lower():
+            return True
+
+    return False
+
+
+def filter_weather(events: list[dict]) -> list[dict]:
+    """Filter out weather markets (temperature, precipitation)."""
+    return [e for e in events if not is_weather_market(e)]
+
+
+def filter_noise(events: list[dict]) -> list[dict]:
+    """
+    Filter out all noise markets (sports, up/down, weather).
+    Convenience function that applies all spam filters.
+    """
+    events = filter_sports(events)
+    events = filter_updown(events)
+    events = filter_weather(events)
+    return events
 
 
 def matches_category(event: dict, category: str) -> bool:
@@ -456,7 +529,7 @@ async def check_volume_milestones(
     )
 
     # Filter out sports markets and resolved markets (no edge)
-    events = filter_sports(events)
+    events = filter_noise(events)
     events = filter_resolved(events)
 
     # Get all slugs for bulk baseline lookup
@@ -1059,7 +1132,7 @@ async def check_underdog_alerts(
     )
 
     # Filter out sports and resolved markets
-    events = filter_sports(events)
+    events = filter_noise(events)
     events = filter_resolved(events)
 
     # Get price changes over 24h
@@ -1141,7 +1214,7 @@ async def check_closing_soon_alerts(
     )
 
     # Filter out sports and resolved markets
-    events = filter_sports(events)
+    events = filter_noise(events)
     events = filter_resolved(events)
 
     # Get volume deltas
@@ -1322,7 +1395,7 @@ async def check_wakeup_alerts(
 
     # Fetch markets
     events = await get_all_markets_paginated(target_count=target_count, include_spam=False)
-    events = filter_sports(events)
+    events = filter_noise(events)
     events = filter_resolved(events)
 
     slugs = [e.get("slug") for e in events if e.get("slug")]
@@ -1361,6 +1434,7 @@ async def check_wakeup_alerts(
                 "velocity_pct_past": velocity_pct_past,
                 "velocity_now": velocity_1h,
                 "velocity_pct_now": velocity_pct_now,
+                "created_at": event.get("created_at", ""),
                 "tags": event.get("tags", []),
                 "end_date": event.get("end_date"),
                 "is_multi_outcome": event.get("is_multi_outcome", False),
@@ -1399,7 +1473,7 @@ async def check_fast_mover_alerts(
 
     # Fetch markets
     events = await get_all_markets_paginated(target_count=target_count, include_spam=False)
-    events = filter_sports(events)
+    events = filter_noise(events)
     events = filter_resolved(events)
 
     slugs = [e.get("slug") for e in events if e.get("slug")]
@@ -1468,9 +1542,11 @@ async def check_early_heat_alerts(
     Trigger: Created <24h ago AND volume <$50K AND velocity >15%/hr
     This catches markets that are small but growing fast.
 
+    Uses API created_at field directly (not our first_seen_at).
+
     Args:
         target_count: How many markets to fetch
-        max_age_hours: Maximum age of market
+        max_age_hours: Maximum age of market (from API created_at)
         max_volume: Maximum current volume
         min_velocity_pct: Minimum velocity %/hr
 
@@ -1478,22 +1554,12 @@ async def check_early_heat_alerts(
         List of early heat markets
     """
     from datetime import datetime, timezone
-    from database import get_volume_deltas_bulk, get_recently_seen_slugs
-
-    # Get recently seen markets
-    recent = get_recently_seen_slugs(hours=max_age_hours)
-    recent_slugs = {r.get("event_slug"): r for r in recent}
-
-    if not recent_slugs:
-        return []
+    from database import get_volume_deltas_bulk
 
     # Fetch current market data
     events = await get_all_markets_paginated(target_count=target_count, include_spam=False)
-    events = filter_sports(events)
+    events = filter_noise(events)
     events = filter_resolved(events)
-
-    # Filter to only recent markets
-    events = [e for e in events if e.get("slug") in recent_slugs]
 
     slugs = [e.get("slug") for e in events if e.get("slug")]
 
@@ -1502,12 +1568,46 @@ async def check_early_heat_alerts(
 
     early_heat = []
     now = datetime.now(timezone.utc)
+    cutoff = now.timestamp() - (max_age_hours * 3600)
 
     for event in events:
         slug = event.get("slug")
         total_volume = event.get("total_volume", 0)
+        created_at = event.get("created_at", "")
 
-        if not slug or total_volume > max_volume:
+        if not slug or not created_at:
+            continue
+
+        # Skip if volume too high
+        if total_volume > max_volume:
+            continue
+
+        # Parse creation time from API
+        try:
+            created_str = created_at
+            if isinstance(created_str, str):
+                created_str = created_str.replace("Z", "+00:00")
+                if "T" in created_str:
+                    created_dt = datetime.fromisoformat(created_str)
+                else:
+                    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]:
+                        try:
+                            created_dt = datetime.strptime(created_str.split("+")[0].split(".")[0], fmt)
+                            created_dt = created_dt.replace(tzinfo=timezone.utc)
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        continue
+            else:
+                created_dt = created_str.replace(tzinfo=timezone.utc) if created_str.tzinfo is None else created_str
+
+            # Skip if too old
+            if created_dt.timestamp() < cutoff:
+                continue
+
+            hours_ago = (now - created_dt).total_seconds() / 3600
+        except Exception:
             continue
 
         # Get velocity
@@ -1517,21 +1617,6 @@ async def check_early_heat_alerts(
         if velocity_pct < min_velocity_pct:
             continue
 
-        # Calculate hours since launch
-        seen_data = recent_slugs.get(slug, {})
-        first_seen = seen_data.get("first_seen_at")
-        hours_ago = 0
-
-        if first_seen:
-            try:
-                if isinstance(first_seen, str):
-                    seen_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
-                else:
-                    seen_dt = first_seen.replace(tzinfo=timezone.utc)
-                hours_ago = (now - seen_dt).total_seconds() / 3600
-            except:
-                pass
-
         early_heat.append({
             "title": event.get("title"),
             "slug": slug,
@@ -1540,6 +1625,7 @@ async def check_early_heat_alerts(
             "velocity": velocity,
             "velocity_pct": velocity_pct,
             "hours_ago": hours_ago,
+            "created_at": created_at,
             "tags": event.get("tags", []),
             "end_date": event.get("end_date"),
             "is_multi_outcome": event.get("is_multi_outcome", False),
@@ -1560,8 +1646,10 @@ async def check_new_launch_alerts(
     """
     Find brand new markets (launched within 1 hour).
 
-    Trigger: first_seen_at <1h ago
+    Trigger: created_at <1h ago (from API)
     This catches new market launches.
+
+    Uses API created_at field directly (not our first_seen_at).
 
     Args:
         target_count: How many markets to fetch
@@ -1571,53 +1659,68 @@ async def check_new_launch_alerts(
         List of new markets
     """
     from datetime import datetime, timezone
-    from database import get_recently_seen_slugs
-
-    # Get very recently seen markets
-    recent = get_recently_seen_slugs(hours=max_age_hours)
-    recent_slugs = {r.get("event_slug"): r for r in recent}
-
-    if not recent_slugs:
-        return []
+    from database import get_volume_deltas_bulk
 
     # Fetch current market data
     events = await get_all_markets_paginated(target_count=target_count, include_spam=False)
-    events = filter_sports(events)
+    events = filter_noise(events)
     events = filter_resolved(events)
 
-    # Filter to only recent markets
-    events = [e for e in events if e.get("slug") in recent_slugs]
+    slugs = [e.get("slug") for e in events if e.get("slug")]
+    deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
 
     new_launches = []
     now = datetime.now(timezone.utc)
+    cutoff = now.timestamp() - (max_age_hours * 3600)
 
     for event in events:
         slug = event.get("slug")
+        created_at = event.get("created_at", "")
 
-        if not slug:
+        if not slug or not created_at:
             continue
 
-        # Calculate hours since launch
-        seen_data = recent_slugs.get(slug, {})
-        first_seen = seen_data.get("first_seen_at")
-        hours_ago = 0
-
-        if first_seen:
-            try:
-                if isinstance(first_seen, str):
-                    seen_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+        # Parse creation time from API
+        try:
+            created_str = created_at
+            if isinstance(created_str, str):
+                created_str = created_str.replace("Z", "+00:00")
+                if "T" in created_str:
+                    created_dt = datetime.fromisoformat(created_str)
                 else:
-                    seen_dt = first_seen.replace(tzinfo=timezone.utc)
-                hours_ago = (now - seen_dt).total_seconds() / 3600
-            except:
-                pass
+                    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%d"]:
+                        try:
+                            created_dt = datetime.strptime(created_str.split("+")[0].split(".")[0], fmt)
+                            created_dt = created_dt.replace(tzinfo=timezone.utc)
+                            break
+                        except ValueError:
+                            continue
+                    else:
+                        continue
+            else:
+                created_dt = created_str.replace(tzinfo=timezone.utc) if created_str.tzinfo is None else created_str
+
+            # Skip if too old
+            if created_dt.timestamp() < cutoff:
+                continue
+
+            hours_ago = (now - created_dt).total_seconds() / 3600
+        except Exception:
+            continue
+
+        total_volume = event.get("total_volume", 0)
+        velocity = deltas_1h.get(slug, 0)
+        velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
 
         new_launches.append({
             "title": event.get("title"),
             "slug": slug,
             "yes_price": event.get("yes_price", 0),
-            "total_volume": event.get("total_volume", 0),
+            "total_volume": total_volume,
+            "velocity": velocity,
+            "velocity_pct": velocity_pct,
             "hours_ago": hours_ago,
+            "created_at": created_at,
             "tags": event.get("tags", []),
             "end_date": event.get("end_date"),
             "is_multi_outcome": event.get("is_multi_outcome", False),
@@ -1740,6 +1843,7 @@ def format_bundled_wakeups(alerts: list[dict]) -> str:
         velocity_now = a.get("velocity_now", 0)
         velocity_pct_now = a.get("velocity_pct_now", 0)
         total_volume = a.get("total_volume", 0)
+        created_at = a.get("created_at", "")
         end_date = a.get("end_date")
         event_outcomes = a.get("event_outcomes", [])
         is_multi = a.get("is_multi_outcome", False)
@@ -1750,15 +1854,36 @@ def format_bundled_wakeups(alerts: list[dict]) -> str:
 
         lines.append(f"[{title}](https://polymarket.com/event/{slug})")
 
-        # Show end date if available
+        # Show created and end dates
+        date_info = []
+        if created_at:
+            try:
+                from datetime import datetime, timezone
+                if isinstance(created_at, str):
+                    created_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+                    now = datetime.now(timezone.utc)
+                    hours_old = (now - created_dt).total_seconds() / 3600
+                    if hours_old < 24:
+                        created_str = f"{hours_old:.0f}h ago" if hours_old >= 1 else f"{hours_old*60:.0f}m ago"
+                    elif hours_old < 48:
+                        created_str = "1 day ago"
+                    elif hours_old < 168:  # 7 days
+                        created_str = f"{hours_old/24:.0f} days ago"
+                    else:
+                        created_str = created_dt.strftime('%b %d')
+                    date_info.append(f"Created: {created_str}")
+            except:
+                pass
         if end_date:
             try:
                 from datetime import datetime
                 if isinstance(end_date, str):
                     dt = datetime.fromisoformat(end_date.replace("Z", "+00:00"))
-                    lines.append(f"📅 Closes: {dt.strftime('%b %d')}")
+                    date_info.append(f"Closes: {dt.strftime('%b %d')}")
             except:
                 pass
+        if date_info:
+            lines.append(f"📅 {' | '.join(date_info)}")
 
         lines.append(f"Was quiet → Now: {vel_str} ({velocity_pct_now:.1f}%/hr){vel_emoji}")
         lines.append(f"Volume: {vol_str}")
@@ -1918,6 +2043,36 @@ def format_bundled_new_launches(alerts: list[dict]) -> str:
             odds_str = _format_odds(a)
             lines.append(f"Just launched | {odds_str}")
 
+        lines.append("")
+
+    return "\n".join(lines).strip()
+
+
+def format_bundled_volume_milestones(alerts: list[dict]) -> str:
+    """Format multiple volume milestone alerts into bundled message."""
+    if not alerts:
+        return ""
+
+    lines = ["💰 *Volume Milestones*", ""]
+
+    for a in alerts:
+        title = _escape_markdown(a.get("title", "Unknown")[:45])
+        slug = a.get("slug", "")
+        threshold = a.get("threshold", 0)
+        current_volume = a.get("current_volume", 0)
+        velocity = a.get("velocity", 0)
+        velocity_pct = a.get("velocity_pct", 0)
+        yes_price = a.get("yes_price", 0)
+
+        threshold_str = _format_volume(threshold)
+        vol_str = _format_volume(current_volume)
+        vel_str = f"+${velocity/1000:.0f}K/hr" if velocity >= 1000 else f"+${velocity:.0f}/hr"
+        vel_emoji = " 🔥🔥" if velocity_pct >= 20 else (" 🔥" if velocity_pct >= 10 else "")
+
+        lines.append(f"[{title}](https://polymarket.com/event/{slug})")
+        lines.append(f"Crossed {threshold_str} → Now at {vol_str}")
+        lines.append(f"Velocity: {vel_str} ({velocity_pct:.1f}%/hr){vel_emoji}")
+        lines.append(f"YES: {yes_price:.0f}%")
         lines.append("")
 
     return "\n".join(lines).strip()

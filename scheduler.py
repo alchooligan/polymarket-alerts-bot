@@ -22,6 +22,7 @@ from config import (
     MARKETS_TO_SCAN,
     DAILY_DIGEST_HOUR,
     DAILY_DIGEST_MINUTE,
+    ALERT_CHANNEL_ID,
 )
 from database import (
     get_all_users_with_alerts_enabled,
@@ -35,17 +36,19 @@ from database import (
 )
 from polymarket import get_all_markets_paginated
 from alerts import (
-    filter_sports,
+    filter_noise,
     # V2 Alert functions
     check_wakeup_alerts,
     check_fast_mover_alerts,
     check_early_heat_alerts,
     check_new_launch_alerts,
+    check_volume_milestones,
     # V2 Formatters
     format_bundled_wakeups,
     format_bundled_fast_movers,
     format_bundled_early_heat,
     format_bundled_new_launches,
+    format_bundled_volume_milestones,
     _escape_markdown,
 )
 
@@ -53,6 +56,10 @@ logger = logging.getLogger(__name__)
 
 # Global scheduler instance
 scheduler: AsyncIOScheduler = None
+
+# Track last run for status monitoring
+last_cycle_time: str = None
+last_cycle_stats: dict = None
 
 
 async def send_alert_to_user(app: Application, telegram_id: int, message: str, alert_type: str, event_slug: str = None) -> bool:
@@ -72,6 +79,28 @@ async def send_alert_to_user(app: Application, telegram_id: int, message: str, a
         return True
     except Exception as e:
         logger.error(f"Failed to send alert to {telegram_id}: {e}")
+        return False
+
+
+async def send_alert_to_channel(app: Application, message: str, alert_type: str) -> bool:
+    """
+    Send an alert message to the configured channel.
+    Returns True if sent successfully, False otherwise.
+    """
+    if not ALERT_CHANNEL_ID:
+        return False
+
+    try:
+        await app.bot.send_message(
+            chat_id=ALERT_CHANNEL_ID,
+            text=message,
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+        logger.info(f"Sent {alert_type} to channel {ALERT_CHANNEL_ID}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send alert to channel {ALERT_CHANNEL_ID}: {e}")
         return False
 
 
@@ -98,6 +127,7 @@ async def run_alert_cycle(app: Application) -> dict:
         "fast_movers": 0,
         "early_heat": 0,
         "new_launches": 0,
+        "volume_milestones": 0,
         "watchlist": 0,
         "alerts_sent": 0,
     }
@@ -119,13 +149,19 @@ async def run_alert_cycle(app: Application) -> dict:
         logger.error(f"Failed to fetch markets: {e} - aborting cycle")
         return stats
 
-    # Get users with alerts enabled
-    users = get_all_users_with_alerts_enabled()
-    if not users:
-        logger.info("No users with alerts enabled, skipping alert checks")
-        return stats
+    # Check if we're in channel mode or individual user mode
+    use_channel = bool(ALERT_CHANNEL_ID)
 
-    alert_users = [u for u in users if u.get("new_markets_enabled")]
+    if use_channel:
+        logger.info(f"Channel mode enabled - sending alerts to {ALERT_CHANNEL_ID}")
+        alert_users = [{"telegram_id": ALERT_CHANNEL_ID}]  # Dummy user for channel
+    else:
+        # Get users with alerts enabled
+        users = get_all_users_with_alerts_enabled()
+        if not users:
+            logger.info("No users with alerts enabled, skipping alert checks")
+            return stats
+        alert_users = [u for u in users if u.get("new_markets_enabled")]
 
     # ==========================================
     # ALERT 1: Wakeup (was quiet, now hot)
@@ -137,20 +173,29 @@ async def run_alert_cycle(app: Application) -> dict:
             stats["wakeups"] = len(wakeups)
 
             if wakeups:
-                for user in alert_users:
-                    user_id = user["telegram_id"]
-                    user_wakeups = filter_unseen_markets(user_id, wakeups, "wakeup")
-
-                    if not user_wakeups:
-                        continue
-
-                    to_send = user_wakeups[:ALERT_CAP_PER_CYCLE]
+                if use_channel:
+                    # Send to channel (no per-user filtering)
+                    to_send = wakeups[:ALERT_CAP_PER_CYCLE]
                     message = format_bundled_wakeups(to_send)
-
-                    sent = await send_alert_to_user(app, user_id, message, "wakeup_bundle", None)
+                    sent = await send_alert_to_channel(app, message, "wakeup_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "wakeup")
+                else:
+                    # Send to individual users
+                    for user in alert_users:
+                        user_id = user["telegram_id"]
+                        user_wakeups = filter_unseen_markets(user_id, wakeups, "wakeup")
+
+                        if not user_wakeups:
+                            continue
+
+                        to_send = user_wakeups[:ALERT_CAP_PER_CYCLE]
+                        message = format_bundled_wakeups(to_send)
+
+                        sent = await send_alert_to_user(app, user_id, message, "wakeup_bundle", None)
+                        if sent:
+                            stats["alerts_sent"] += 1
+                            mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "wakeup")
         except Exception as e:
             logger.error(f"Error in wakeup alerts: {e}")
 
@@ -164,20 +209,27 @@ async def run_alert_cycle(app: Application) -> dict:
             stats["fast_movers"] = len(movers)
 
             if movers:
-                for user in alert_users:
-                    user_id = user["telegram_id"]
-                    user_movers = filter_unseen_markets(user_id, movers, "fast_mover")
-
-                    if not user_movers:
-                        continue
-
-                    to_send = user_movers[:ALERT_CAP_PER_CYCLE]
+                if use_channel:
+                    to_send = movers[:ALERT_CAP_PER_CYCLE]
                     message = format_bundled_fast_movers(to_send)
-
-                    sent = await send_alert_to_user(app, user_id, message, "fast_mover_bundle", None)
+                    sent = await send_alert_to_channel(app, message, "fast_mover_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "fast_mover")
+                else:
+                    for user in alert_users:
+                        user_id = user["telegram_id"]
+                        user_movers = filter_unseen_markets(user_id, movers, "fast_mover")
+
+                        if not user_movers:
+                            continue
+
+                        to_send = user_movers[:ALERT_CAP_PER_CYCLE]
+                        message = format_bundled_fast_movers(to_send)
+
+                        sent = await send_alert_to_user(app, user_id, message, "fast_mover_bundle", None)
+                        if sent:
+                            stats["alerts_sent"] += 1
+                            mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "fast_mover")
         except Exception as e:
             logger.error(f"Error in fast mover alerts: {e}")
 
@@ -191,20 +243,27 @@ async def run_alert_cycle(app: Application) -> dict:
             stats["early_heat"] = len(early)
 
             if early:
-                for user in alert_users:
-                    user_id = user["telegram_id"]
-                    user_early = filter_unseen_markets(user_id, early, "early_heat")
-
-                    if not user_early:
-                        continue
-
-                    to_send = user_early[:ALERT_CAP_PER_CYCLE]
+                if use_channel:
+                    to_send = early[:ALERT_CAP_PER_CYCLE]
                     message = format_bundled_early_heat(to_send)
-
-                    sent = await send_alert_to_user(app, user_id, message, "early_heat_bundle", None)
+                    sent = await send_alert_to_channel(app, message, "early_heat_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "early_heat")
+                else:
+                    for user in alert_users:
+                        user_id = user["telegram_id"]
+                        user_early = filter_unseen_markets(user_id, early, "early_heat")
+
+                        if not user_early:
+                            continue
+
+                        to_send = user_early[:ALERT_CAP_PER_CYCLE]
+                        message = format_bundled_early_heat(to_send)
+
+                        sent = await send_alert_to_user(app, user_id, message, "early_heat_bundle", None)
+                        if sent:
+                            stats["alerts_sent"] += 1
+                            mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "early_heat")
         except Exception as e:
             logger.error(f"Error in early heat alerts: {e}")
 
@@ -218,27 +277,73 @@ async def run_alert_cycle(app: Application) -> dict:
             stats["new_launches"] = len(launches)
 
             if launches:
-                for user in alert_users:
-                    user_id = user["telegram_id"]
-                    user_launches = filter_unseen_markets(user_id, launches, "new_launch")
-
-                    if not user_launches:
-                        continue
-
-                    to_send = user_launches[:ALERT_CAP_PER_CYCLE]
+                if use_channel:
+                    to_send = launches[:ALERT_CAP_PER_CYCLE]
                     message = format_bundled_new_launches(to_send)
-
-                    sent = await send_alert_to_user(app, user_id, message, "new_launch_bundle", None)
+                    sent = await send_alert_to_channel(app, message, "new_launch_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "new_launch")
+                else:
+                    for user in alert_users:
+                        user_id = user["telegram_id"]
+                        user_launches = filter_unseen_markets(user_id, launches, "new_launch")
+
+                        if not user_launches:
+                            continue
+
+                        to_send = user_launches[:ALERT_CAP_PER_CYCLE]
+                        message = format_bundled_new_launches(to_send)
+
+                        sent = await send_alert_to_user(app, user_id, message, "new_launch_bundle", None)
+                        if sent:
+                            stats["alerts_sent"] += 1
+                            mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "new_launch")
         except Exception as e:
             logger.error(f"Error in new launch alerts: {e}")
 
     # ==========================================
-    # ALERT 5: Watchlist (price moves)
+    # ALERT 5: Volume Milestones (crossed $100K, $250K, etc)
     # ==========================================
-    watched = get_all_watched_markets()
+    if alert_users:
+        try:
+            logger.info("Checking volume milestones...")
+            milestones, discoveries = await check_volume_milestones(target_count=MARKETS_TO_SCAN)
+            stats["volume_milestones"] = len(milestones)
+
+            if milestones:
+                if use_channel:
+                    to_send = milestones[:ALERT_CAP_PER_CYCLE]
+                    message = format_bundled_volume_milestones(to_send)
+                    sent = await send_alert_to_channel(app, message, "volume_milestone_bundle")
+                    if sent:
+                        stats["alerts_sent"] += 1
+                else:
+                    for user in alert_users:
+                        user_id = user["telegram_id"]
+                        user_milestones = filter_unseen_markets(user_id, milestones, "volume_milestone")
+
+                        if not user_milestones:
+                            continue
+
+                        to_send = user_milestones[:ALERT_CAP_PER_CYCLE]
+                        message = format_bundled_volume_milestones(to_send)
+
+                        sent = await send_alert_to_user(app, user_id, message, "volume_milestone_bundle", None)
+                        if sent:
+                            stats["alerts_sent"] += 1
+                            mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "volume_milestone")
+        except Exception as e:
+            logger.error(f"Error in volume milestone alerts: {e}")
+
+    # ==========================================
+    # ALERT 6: Watchlist (price moves)
+    # Note: Watchlist is per-user, so skip in channel mode
+    # ==========================================
+    if not use_channel:
+        watched = get_all_watched_markets()
+    else:
+        watched = []
+
     if watched:
         logger.info(f"Checking {len(watched)} watched markets...")
 
@@ -276,6 +381,12 @@ YES: {last_price:.0f}% → {current_price:.0f}% ({change_str})"""
 
                 # Update the stored price
                 update_watchlist_price(user_id, slug, current_price)
+
+    # Track last run for status monitoring
+    global last_cycle_time, last_cycle_stats
+    from datetime import datetime, timezone
+    last_cycle_time = datetime.now(timezone.utc).isoformat()
+    last_cycle_stats = stats
 
     logger.info(f"Alert cycle complete: {stats}")
     return stats
@@ -324,6 +435,30 @@ def stop_scheduler() -> None:
         logger.info("Scheduler stopped.")
 
 
+def get_scheduler_status() -> dict:
+    """Get scheduler status for monitoring."""
+    global scheduler, last_cycle_time, last_cycle_stats
+    from datetime import datetime, timezone
+
+    status = {
+        "running": scheduler is not None and scheduler.running,
+        "last_cycle_time": last_cycle_time,
+        "last_cycle_stats": last_cycle_stats,
+        "jobs": [],
+    }
+
+    if scheduler and scheduler.running:
+        for job in scheduler.get_jobs():
+            next_run = job.next_run_time
+            status["jobs"].append({
+                "id": job.id,
+                "name": job.name,
+                "next_run": next_run.isoformat() if next_run else None,
+            })
+
+    return status
+
+
 async def run_daily_digest(app: Application) -> dict:
     """
     Send a daily digest to all users at 9am.
@@ -351,7 +486,7 @@ async def run_daily_digest(app: Application) -> dict:
             return stats
 
         # Filter out sports and resolved markets
-        events = filter_sports(events)
+        events = filter_noise(events)  # Sports + Up/Down + Weather
         events = [e for e in events if 5 < e.get("yes_price", 50) < 95]
 
         slugs = [e.get("slug") for e in events if e.get("slug")]

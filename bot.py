@@ -7,7 +7,7 @@ import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
-from config import TELEGRAM_BOT_TOKEN, CHECK_INTERVAL_MINUTES
+from config import TELEGRAM_BOT_TOKEN, CHECK_INTERVAL_MINUTES, ADMIN_IDS
 from polymarket import get_unique_events, get_all_markets_paginated
 from database import (
     init_database,
@@ -21,11 +21,12 @@ from database import (
     get_recently_seen_slugs,
     get_price_deltas_bulk,
 )
-from scheduler import start_scheduler, stop_scheduler, run_manual_cycle, run_daily_digest
+from scheduler import start_scheduler, stop_scheduler, run_manual_cycle, run_daily_digest, get_scheduler_status
 from alerts import (
     check_underdog_alerts,
     format_bundled_underdogs,
     filter_sports,
+    filter_noise,  # Combined filter: sports + up/down + weather
     filter_resolved,
     filter_by_category,
     get_available_categories,
@@ -302,7 +303,7 @@ async def discover_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await update.message.reply_text("No markets found. Try again later.")
             return
 
-        events = filter_sports(events)
+        events = filter_noise(events)  # Sports + Up/Down + Weather
         events = filter_resolved(events)
 
         if category:
@@ -498,7 +499,7 @@ async def hot_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
 
         # Filter out sports and resolved markets
-        events = filter_sports(events)
+        events = filter_noise(events)  # Sports + Up/Down + Weather
         events = filter_resolved(events)
 
         # Apply category filter if specified
@@ -643,7 +644,7 @@ async def top_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await update.message.reply_text("No markets found. Try again later.")
             return
 
-        events = filter_sports(events)
+        events = filter_noise(events)  # Sports + Up/Down + Weather
         events = filter_resolved(events)
 
         if category:
@@ -780,11 +781,11 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         all_events = await get_all_markets_paginated(target_count=10000, include_spam=False)
         total_fetched = len(all_events)
 
-        events_no_sports = filter_sports(all_events)
-        sports_filtered = total_fetched - len(events_no_sports)
+        events_no_noise = filter_noise(all_events)  # Sports + Up/Down + Weather
+        noise_filtered = total_fetched - len(events_no_noise)
 
-        events = filter_resolved(events_no_sports)
-        resolved_filtered = len(events_no_sports) - len(events)
+        events = filter_resolved(events_no_noise)
+        resolved_filtered = len(events_no_noise) - len(events)
 
         # Apply category filter if specified
         if category:
@@ -886,7 +887,7 @@ async def new_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         header = f"""🆕 New Markets (last {time_label}){cat_label}
 
 Sorted by newest first."""
-        footer = f"{len(new_markets)} new in {time_label} (of {len(events)} eligible)\n_Filtered: {sports_filtered} sports, {resolved_filtered} resolved_"
+        footer = f"{len(new_markets)} new in {time_label} (of {len(events)} eligible)\n_Filtered: {noise_filtered} noise, {resolved_filtered} resolved_"
 
         pagination_cache[user_id]["new"] = {
             "markets": new_markets,
@@ -936,7 +937,7 @@ async def quiet_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await update.message.reply_text("No markets found. Try again later.")
             return
 
-        events = filter_sports(events)
+        events = filter_noise(events)  # Sports + Up/Down + Weather
         events = filter_resolved(events)
 
         if category:
@@ -1057,7 +1058,7 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await update.message.reply_text("No markets found. Try again later.")
             return
 
-        events = filter_sports(events)
+        events = filter_noise(events)  # Sports + Up/Down + Weather
         events = filter_resolved(events)
 
         if category:
@@ -1065,7 +1066,10 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         slugs = [e["slug"] for e in events]
         price_deltas = get_price_deltas_bulk(slugs, hours=hours)
+        price_deltas_6h = get_price_deltas_bulk(slugs, hours=6) if hours != 6 else price_deltas
+        price_deltas_24h = get_price_deltas_bulk(slugs, hours=24) if hours != 24 else price_deltas
         deltas_1h = get_volume_deltas_bulk(slugs, hours=1)
+        deltas_6h = get_volume_deltas_bulk(slugs, hours=6)
 
         movers = []
         for event in events:
@@ -1092,6 +1096,11 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         movers.sort(key=lambda x: abs(x["price_change"]), reverse=True)
 
+        # Diagnostic: how many markets have price data vs total
+        markets_with_data = len(price_deltas)
+        markets_total = len(events)
+        markets_missing_data = markets_total - markets_with_data
+
         if not movers:
             cat_msg = f" in {category}" if category else ""
             has_price_data = len(price_deltas) > 0
@@ -1107,13 +1116,27 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await update.message.reply_text(
                     f"No significant movers{cat_msg} in last {time_label}.\n\n"
                     f"Threshold: >={threshold}% price change.\n"
+                    f"Data coverage: {markets_with_data}/{markets_total} markets have {time_label} history.\n"
                     f"Try: /movers 6h or /movers 24h"
                 )
             return
 
         # Enrich for display
         for m in movers:
-            m["price_change_24h"] = m.get("price_change", 0)
+            slug = m.get("slug")
+            total_volume = m.get("total_volume", 0)
+
+            # 6h volume data
+            delta_6h = deltas_6h.get(slug, 0)
+            m["delta_6h"] = delta_6h
+            vol_6h_ago = total_volume - delta_6h
+            m["volume_growth_pct"] = (delta_6h / vol_6h_ago * 100) if vol_6h_ago > 0 else 0
+
+            # Price data for 6h and 24h
+            price_data_6h = price_deltas_6h.get(slug, {})
+            price_data_24h = price_deltas_24h.get(slug, {})
+            m["price_change_6h"] = price_data_6h.get("delta", 0)
+            m["price_change_24h"] = price_data_24h.get("delta", 0)
 
         # Store in pagination cache
         user_id = update.effective_user.id
@@ -1123,14 +1146,18 @@ async def movers_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 Prices changed = opinions shifted.
 Sorted by absolute price swing."""
 
+        # Footer with data coverage info
+        coverage_note = f" (tracking {markets_with_data}/{markets_total})" if markets_missing_data > 100 else ""
+        footer = f"{len(movers)} markets moved >={threshold}%{coverage_note}"
+
         pagination_cache[user_id]["movers"] = {
             "markets": movers,
             "header": header,
-            "footer": f"{len(movers)} markets moved >={threshold}%",
+            "footer": footer,
         }
 
         message, keyboard = format_paginated_markets(
-            movers, 0, "movers", header, None, f"{len(movers)} markets moved >={threshold}%"
+            movers, 0, "movers", header, None, footer
         )
         await update.message.reply_text(
             message, parse_mode="Markdown", disable_web_page_preview=True, reply_markup=keyboard
@@ -1373,7 +1400,7 @@ async def digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         # Filter out sports and resolved
-        events = filter_sports(events)
+        events = filter_noise(events)  # Sports + Up/Down + Weather
         events = filter_resolved(events)
 
         slugs = [e.get("slug") for e in events if e.get("slug")]
@@ -1737,6 +1764,118 @@ Run /seed to populate test data."""
         await update.message.reply_text(f"Error: {e}")
 
 
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /status command - show scheduler and alert status."""
+    from datetime import datetime, timezone
+
+    try:
+        status = get_scheduler_status()
+
+        # Build status message
+        lines = ["*Scheduler Status*", ""]
+
+        if status["running"]:
+            lines.append("✅ Scheduler: RUNNING")
+        else:
+            lines.append("❌ Scheduler: STOPPED")
+
+        # Last cycle info
+        if status["last_cycle_time"]:
+            try:
+                last_dt = datetime.fromisoformat(status["last_cycle_time"])
+                now = datetime.now(timezone.utc)
+                mins_ago = (now - last_dt).total_seconds() / 60
+                lines.append(f"⏱️ Last cycle: {mins_ago:.0f}m ago")
+            except:
+                lines.append(f"⏱️ Last cycle: {status['last_cycle_time']}")
+        else:
+            lines.append("⏱️ Last cycle: Never (just started?)")
+
+        # Last cycle stats
+        if status["last_cycle_stats"]:
+            stats = status["last_cycle_stats"]
+            lines.append("")
+            lines.append("*Last Cycle Stats:*")
+            lines.append(f"• Markets scanned: {stats.get('markets_scanned', 0)}")
+            lines.append(f"• Wakeups found: {stats.get('wakeups', 0)}")
+            lines.append(f"• Fast movers: {stats.get('fast_movers', 0)}")
+            lines.append(f"• Early heat: {stats.get('early_heat', 0)}")
+            lines.append(f"• New launches: {stats.get('new_launches', 0)}")
+            lines.append(f"• Vol milestones: {stats.get('volume_milestones', 0)}")
+            lines.append(f"• Alerts sent: {stats.get('alerts_sent', 0)}")
+
+        # Next runs
+        if status["jobs"]:
+            lines.append("")
+            lines.append("*Scheduled Jobs:*")
+            for job in status["jobs"]:
+                if job["next_run"]:
+                    try:
+                        next_dt = datetime.fromisoformat(job["next_run"])
+                        now = datetime.now(timezone.utc)
+                        mins_until = (next_dt - now).total_seconds() / 60
+                        lines.append(f"• {job['name']}: in {mins_until:.0f}m")
+                    except:
+                        lines.append(f"• {job['name']}: {job['next_run']}")
+
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Error in status: {e}")
+        await update.message.reply_text(f"Error: {e}")
+
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle the /broadcast command - send a message to all users (admin only)."""
+    from database import get_all_users_with_alerts_enabled
+
+    user_id = update.effective_user.id
+
+    # Check if user is admin
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("This command is admin-only.")
+        return
+
+    # Get the message to broadcast
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /broadcast <message>\n\n"
+            "Example: /broadcast The bot will be down for maintenance tonight."
+        )
+        return
+
+    message = " ".join(context.args)
+
+    # Get all users
+    users = get_all_users_with_alerts_enabled()
+    if not users:
+        await update.message.reply_text("No users to broadcast to.")
+        return
+
+    await update.message.reply_text(f"Broadcasting to {len(users)} users...")
+
+    sent_count = 0
+    failed_count = 0
+
+    for user in users:
+        try:
+            await context.bot.send_message(
+                chat_id=user["telegram_id"],
+                text=f"*Announcement*\n\n{message}",
+                parse_mode="Markdown"
+            )
+            sent_count += 1
+        except Exception as e:
+            logger.error(f"Failed to broadcast to {user['telegram_id']}: {e}")
+            failed_count += 1
+
+    await update.message.reply_text(
+        f"Broadcast complete.\n"
+        f"✅ Sent: {sent_count}\n"
+        f"❌ Failed: {failed_count}"
+    )
+
+
 async def main() -> None:
     """Start the bot."""
     # Check for token
@@ -1774,6 +1913,8 @@ async def main() -> None:
     application.add_handler(CommandHandler("watchlist", watchlist_command))
     application.add_handler(CommandHandler("digest", digest_command))
     application.add_handler(CommandHandler("dbstatus", dbstatus_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
 
     # Add callback handler for inline buttons
     application.add_handler(CallbackQueryHandler(callback_handler))
