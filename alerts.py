@@ -1533,6 +1533,7 @@ async def check_fast_mover_alerts(
 async def check_big_swing_alerts(
     target_count: int = 500,
     price_threshold: float = 15.0,
+    min_volume: float = 100000,
     hours: int = 1,
 ) -> list[dict]:
     """
@@ -1541,13 +1542,14 @@ async def check_big_swing_alerts(
     Different from Fast Movers:
     - Bigger threshold (15% vs 10%)
     - Shorter window (1h vs 2h)
-    - No volume requirement - pure price action
+    - Requires $100K+ volume (real markets only)
 
-    This catches dramatic moves that might indicate breaking news.
+    This catches dramatic moves on serious markets.
 
     Args:
         target_count: How many markets to fetch
         price_threshold: Minimum price change %
+        min_volume: Minimum total volume (default $100K)
         hours: Time window to check
 
     Returns:
@@ -1581,8 +1583,8 @@ async def check_big_swing_alerts(
         old_price = price_data.get("old", 0)
         current_price = event.get("yes_price", 0)
 
-        # Check threshold - pure price action, no volume requirement
-        if abs(price_change) >= price_threshold:
+        # Check thresholds - big price move AND serious volume
+        if abs(price_change) >= price_threshold and total_volume >= min_volume:
             velocity = velocity_1h.get(slug, 0)
             velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
 
