@@ -1836,15 +1836,16 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text("This command is admin-only.")
         return
 
-    # Get the message to broadcast
-    if not context.args:
+    # Get the message to broadcast (preserve newlines)
+    raw_text = update.message.text or ""
+    message = raw_text.replace("/broadcast", "", 1).strip()
+
+    if not message:
         await update.message.reply_text(
             "Usage: /broadcast <message>\n\n"
             "Example: /broadcast The bot will be down for maintenance tonight."
         )
         return
-
-    message = " ".join(context.args)
 
     # Get all users
     users = get_all_users_with_alerts_enabled()
