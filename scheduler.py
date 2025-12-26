@@ -163,6 +163,10 @@ async def run_alert_cycle(app: Application) -> dict:
             return stats
         alert_users = [u for u in users if u.get("new_markets_enabled")]
 
+    # Track slugs alerted THIS CYCLE to avoid duplicate alerts across alert types
+    # e.g., same market triggering both Wakeup and Early Heat
+    cycle_alerted_slugs = set()
+
     # ==========================================
     # ALERT 1: Wakeup (was quiet, now hot)
     # ==========================================
@@ -180,6 +184,8 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "wakeup_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
+                        # Track alerted slugs to avoid duplicates in other alert types
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
                 else:
                     # Send to individual users
                     for user in alert_users:
@@ -196,6 +202,7 @@ async def run_alert_cycle(app: Application) -> dict:
                         if sent:
                             stats["alerts_sent"] += 1
                             mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "wakeup")
+                            cycle_alerted_slugs.update(m["slug"] for m in to_send)
         except Exception as e:
             logger.error(f"Error in wakeup alerts: {e}")
 
@@ -206,6 +213,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking fast mover alerts...")
             movers = await check_fast_mover_alerts(target_count=MARKETS_TO_SCAN)
+            # Filter out markets already alerted this cycle
+            movers = [m for m in movers if m["slug"] not in cycle_alerted_slugs]
             stats["fast_movers"] = len(movers)
 
             if movers:
@@ -215,6 +224,7 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "fast_mover_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -230,6 +240,7 @@ async def run_alert_cycle(app: Application) -> dict:
                         if sent:
                             stats["alerts_sent"] += 1
                             mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "fast_mover")
+                            cycle_alerted_slugs.update(m["slug"] for m in to_send)
         except Exception as e:
             logger.error(f"Error in fast mover alerts: {e}")
 
@@ -240,6 +251,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking big swing alerts...")
             swings = await check_big_swing_alerts(target_count=MARKETS_TO_SCAN)
+            # Filter out markets already alerted this cycle
+            swings = [m for m in swings if m["slug"] not in cycle_alerted_slugs]
             stats["big_swings"] = len(swings)
 
             if swings:
@@ -249,6 +262,7 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "big_swing_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -264,6 +278,7 @@ async def run_alert_cycle(app: Application) -> dict:
                         if sent:
                             stats["alerts_sent"] += 1
                             mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "big_swing")
+                            cycle_alerted_slugs.update(m["slug"] for m in to_send)
         except Exception as e:
             logger.error(f"Error in big swing alerts: {e}")
 
@@ -274,6 +289,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking early heat alerts...")
             early = await check_early_heat_alerts(target_count=MARKETS_TO_SCAN)
+            # Filter out markets already alerted this cycle
+            early = [m for m in early if m["slug"] not in cycle_alerted_slugs]
             stats["early_heat"] = len(early)
 
             if early:
@@ -283,6 +300,7 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "early_heat_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -298,6 +316,7 @@ async def run_alert_cycle(app: Application) -> dict:
                         if sent:
                             stats["alerts_sent"] += 1
                             mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "early_heat")
+                            cycle_alerted_slugs.update(m["slug"] for m in to_send)
         except Exception as e:
             logger.error(f"Error in early heat alerts: {e}")
 
@@ -308,6 +327,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking new launch alerts...")
             launches = await check_new_launch_alerts(target_count=MARKETS_TO_SCAN)
+            # Filter out markets already alerted this cycle
+            launches = [m for m in launches if m["slug"] not in cycle_alerted_slugs]
             stats["new_launches"] = len(launches)
 
             if launches:
@@ -317,6 +338,7 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "new_launch_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -332,6 +354,7 @@ async def run_alert_cycle(app: Application) -> dict:
                         if sent:
                             stats["alerts_sent"] += 1
                             mark_user_alerted_bulk(user_id, [m["slug"] for m in to_send], "new_launch")
+                            cycle_alerted_slugs.update(m["slug"] for m in to_send)
         except Exception as e:
             logger.error(f"Error in new launch alerts: {e}")
 

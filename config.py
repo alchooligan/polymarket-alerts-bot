@@ -150,6 +150,23 @@ WEATHER_SLUG_PATTERNS = [
     "weather-",
 ]
 
+# Celebrity activity counting markets - no edge, just noise
+# e.g., "Elon Musk # tweets December 19 - December 26"
+ACTIVITY_COUNT_PATTERNS = [
+    "# tweets",
+    "# of tweets",
+    "number of tweets",
+    "how many tweets",
+    "tweet count",
+]
+
+ACTIVITY_COUNT_SLUG_PATTERNS = [
+    "elon-musk-of-tweets",
+    "elon-musk-tweets",
+    "-tweet-count-",
+    "-number-of-tweets-",
+]
+
 # Sports/esports slug patterns to exclude (no edge on sports betting)
 SPORTS_SLUG_PATTERNS = [
     "nfl-", "nba-", "nhl-", "mlb-", "mls-",

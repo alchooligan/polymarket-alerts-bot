@@ -145,8 +145,8 @@ Category: /discover crypto, /hot politics
 
 ⚡ *Wakeup* — Market was quiet, now hot
 📈 *Fast Mover* — 10%+ price move with volume
+🎢 *Big Swing* — 15%+ in 1hr on $100K+ markets
 🌱 *Early Heat* — New market gaining traction
-🆕 *New Launch* — Brand new markets
 📊 *Watchlist* — Your tracked markets move
 
 /settings — Toggle alerts
@@ -156,7 +156,7 @@ Category: /discover crypto, /hot politics
 
 Type /how for the full guide
 
-Sports + near-resolved markets filtered."""
+Auto-filtered: Sports, weather, stock up/down."""
 
     await update.message.reply_text(welcome_message)
 
@@ -190,27 +190,36 @@ Consolidated summary — less spam, same signal.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-🔔 AUTOMATIC ALERTS (V2)
+🔔 AUTOMATIC ALERTS
 
 ⚡ Wakeup
 → Market was quiet (<2%/hr), now hot (>10%/hr)
 → Catches breaking news
 
 📈 Fast Mover
-→ Price moved 10%+ in 2h with $10K+ volume behind
+→ Price moved 10%+ in 2h with $10K+ volume
 → Informed money moving prices
+
+🎢 Big Swing
+→ 15%+ price move in 1 hour on $100K+ markets
+→ Major sentiment shifts on liquid markets
 
 🌱 Early Heat
 → New market (<24h) with >15%/hr velocity
 → Catches markets launching with traction
 
-🆕 New Launch
-→ Brand new markets (<1h old)
-→ Be first to see new opportunities
-
 📊 Watchlist
 → Your tracked markets move 5%+
 → /watch <slug> to add
+
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+🚫 AUTO-FILTERED
+
+• Sports / esports / fantasy
+• Weather predictions
+• Stock/crypto up or down
+• Near-resolved (95%+)
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -246,7 +255,7 @@ Velocity %/hr = money flow / market size
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 
-📦 LEGACY COMMANDS
+📦 OTHER COMMANDS
 
 /quiet — Sleeping giants (low activity)
 /underdogs — Long shots rising
@@ -258,9 +267,7 @@ Velocity %/hr = money flow / market size
 • /discover for daily alpha hunting
 • /hot 1h when news breaks
 • /movers 6h to see what moved
-• /new 24h for fresh opportunities
-
-Sports + resolved (95%+) markets filtered."""
+• /new 24h for fresh opportunities"""
 
     await update.message.reply_text(msg)
 

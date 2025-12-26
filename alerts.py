@@ -19,6 +19,8 @@ from config import (
     UP_DOWN_TICKERS,
     WEATHER_PATTERNS,
     WEATHER_SLUG_PATTERNS,
+    ACTIVITY_COUNT_PATTERNS,
+    ACTIVITY_COUNT_SLUG_PATTERNS,
 )
 from polymarket import get_unique_events, get_popular_markets, get_all_markets_paginated
 from database import (
@@ -141,14 +143,41 @@ def filter_weather(events: list[dict]) -> list[dict]:
     return [e for e in events if not is_weather_market(e)]
 
 
+def is_activity_count_market(event: dict) -> bool:
+    """
+    Check if a market is an activity counting market (e.g., Elon Musk # tweets).
+    These are noise with no informational edge.
+    """
+    slug = event.get("slug", "").lower()
+    title = event.get("title", "").lower()
+
+    # Check slug patterns
+    for pattern in ACTIVITY_COUNT_SLUG_PATTERNS:
+        if pattern.lower() in slug:
+            return True
+
+    # Check title patterns
+    for pattern in ACTIVITY_COUNT_PATTERNS:
+        if pattern.lower() in title:
+            return True
+
+    return False
+
+
+def filter_activity_count(events: list[dict]) -> list[dict]:
+    """Filter out activity counting markets (Elon tweets, etc.)."""
+    return [e for e in events if not is_activity_count_market(e)]
+
+
 def filter_noise(events: list[dict]) -> list[dict]:
     """
-    Filter out all noise markets (sports, up/down, weather).
+    Filter out all noise markets (sports, up/down, weather, activity counting).
     Convenience function that applies all spam filters.
     """
     events = filter_sports(events)
     events = filter_updown(events)
     events = filter_weather(events)
+    events = filter_activity_count(events)
     return events
 
 
@@ -1375,6 +1404,7 @@ async def check_wakeup_alerts(
     quiet_threshold: float = 2.0,
     hot_threshold: float = 10.0,
     quiet_hours: int = 6,
+    min_volume: float = 10_000,
 ) -> list[dict]:
     """
     Find markets that were quiet but are now waking up.
@@ -1387,6 +1417,7 @@ async def check_wakeup_alerts(
         quiet_threshold: Max velocity %/hr to be considered "quiet"
         hot_threshold: Min velocity %/hr to be considered "hot now"
         quiet_hours: How long must have been quiet
+        min_volume: Minimum market volume to alert (default $10K)
 
     Returns:
         List of markets that just woke up
@@ -1412,7 +1443,8 @@ async def check_wakeup_alerts(
         slug = event.get("slug")
         total_volume = event.get("total_volume", 0)
 
-        if not slug or total_volume == 0:
+        # Skip tiny markets - need at least $10K to be worth alerting
+        if not slug or total_volume < min_volume:
             continue
 
         # Current velocity (1h)
@@ -1719,19 +1751,19 @@ async def check_early_heat_alerts(
 
 async def check_new_launch_alerts(
     target_count: int = 500,
-    max_age_hours: int = 1,
+    max_age_hours: int = 3,
 ) -> list[dict]:
     """
-    Find brand new markets (launched within 1 hour).
+    Find brand new markets (launched within 3 hours).
 
-    Trigger: created_at <1h ago (from API)
+    Trigger: created_at <3h ago (from API)
     This catches new market launches.
 
     Uses API created_at field directly (not our first_seen_at).
 
     Args:
         target_count: How many markets to fetch
-        max_age_hours: Maximum age (default 1h = brand new)
+        max_age_hours: Maximum age (default 3h for reasonable coverage)
 
     Returns:
         List of new markets
