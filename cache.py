@@ -214,6 +214,66 @@ async def invalidate_market_cache() -> int:
 
 
 # ============================================
+# Cached database query wrappers
+# ============================================
+
+async def get_volume_deltas_cached(
+    event_slugs: list[str],
+    hours: int,
+    db_func
+) -> dict[str, float]:
+    """
+    Get volume deltas with caching.
+    Falls back to db_func if cache miss.
+    """
+    if not event_slugs:
+        return {}
+
+    slugs_hash = hash_slugs(event_slugs)
+
+    # Try cache
+    cached = await get_cached_volume_deltas(slugs_hash, hours)
+    if cached is not None:
+        return cached
+
+    # Cache miss - call DB function (sync)
+    result = db_func(event_slugs, hours)
+
+    # Cache the result
+    await set_cached_volume_deltas(result, slugs_hash, hours)
+
+    return result
+
+
+async def get_price_deltas_cached(
+    event_slugs: list[str],
+    hours: int,
+    db_func
+) -> dict[str, dict]:
+    """
+    Get price deltas with caching.
+    Falls back to db_func if cache miss.
+    """
+    if not event_slugs:
+        return {}
+
+    slugs_hash = hash_slugs(event_slugs)
+
+    # Try cache
+    cached = await get_cached_price_deltas(slugs_hash, hours)
+    if cached is not None:
+        return cached
+
+    # Cache miss - call DB function (sync)
+    result = db_func(event_slugs, hours)
+
+    # Cache the result
+    await set_cached_price_deltas(result, slugs_hash, hours)
+
+    return result
+
+
+# ============================================
 # Cache stats / diagnostics
 # ============================================
 
