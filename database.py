@@ -199,6 +199,24 @@ def init_database() -> None:
         ON whale_trades(alerted_at)
     """)
 
+    # Channel alerts - tracks which markets were alerted in the channel
+    # Used to prevent duplicate alerts across different alert types
+    # e.g., same market triggering both "Early Heat" and "Wakeup"
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS channel_alerts (
+            event_slug TEXT NOT NULL,
+            alert_type TEXT NOT NULL,
+            alerted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (event_slug, alert_type)
+        )
+    """)
+
+    # Index for time-based cleanup
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS idx_channel_alerts_time
+        ON channel_alerts(alerted_at)
+    """)
+
     conn.commit()
     conn.close()
     print("Database initialized.")
@@ -1115,6 +1133,88 @@ def get_users_with_whale_alerts() -> list[dict]:
     rows = cursor.fetchall()
     conn.close()
     return [dict(row) for row in rows]
+
+
+# ============================================
+# Channel alert functions (cross-cycle deduplication)
+# ============================================
+
+def was_channel_alerted(event_slug: str, hours: int = 1) -> bool:
+    """
+    Check if this market was alerted in the channel within the last N hours.
+    Used to prevent duplicate alerts across different alert types.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """SELECT 1 FROM channel_alerts
+           WHERE event_slug = ?
+           AND alerted_at >= datetime('now', ?)""",
+        (event_slug, f"-{hours} hours")
+    )
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
+
+
+def get_recently_alerted_slugs(hours: int = 1) -> set[str]:
+    """
+    Get all market slugs that were alerted in the channel within the last N hours.
+    Returns a set for fast lookup.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """SELECT DISTINCT event_slug FROM channel_alerts
+           WHERE alerted_at >= datetime('now', ?)""",
+        (f"-{hours} hours",)
+    )
+    slugs = {row["event_slug"] for row in cursor.fetchall()}
+    conn.close()
+    return slugs
+
+
+def mark_channel_alerted(event_slug: str, alert_type: str) -> None:
+    """Record that a market was alerted in the channel."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """INSERT OR REPLACE INTO channel_alerts (event_slug, alert_type, alerted_at)
+           VALUES (?, ?, CURRENT_TIMESTAMP)""",
+        (event_slug, alert_type)
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_channel_alerted_bulk(event_slugs: list[str], alert_type: str) -> None:
+    """Record that multiple markets were alerted in the channel."""
+    if not event_slugs:
+        return
+    conn = get_connection()
+    cursor = conn.cursor()
+    for slug in event_slugs:
+        cursor.execute(
+            """INSERT OR REPLACE INTO channel_alerts (event_slug, alert_type, alerted_at)
+               VALUES (?, ?, CURRENT_TIMESTAMP)""",
+            (slug, alert_type)
+        )
+    conn.commit()
+    conn.close()
+
+
+def cleanup_old_channel_alerts(hours: int = 24) -> int:
+    """Delete channel alert records older than X hours. Returns count deleted."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "DELETE FROM channel_alerts WHERE alerted_at < datetime('now', ?)",
+        (f"-{hours} hours",)
+    )
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
 
 
 # ============================================
