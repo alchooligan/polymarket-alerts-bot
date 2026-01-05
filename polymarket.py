@@ -17,6 +17,7 @@ from config import (
     SPAM_TIMEFRAME_KEYWORDS,
     SPAM_PHRASES,
 )
+from cache import get_cached_markets, set_cached_markets
 
 
 async def fetch_recent_events(limit: int = 100, closed: bool = False) -> list[dict]:
@@ -693,7 +694,8 @@ async def get_popular_markets(limit: int = 100, include_spam: bool = False) -> l
 
 async def get_all_markets_paginated(
     target_count: int = 500,
-    include_spam: bool = False
+    include_spam: bool = False,
+    use_cache: bool = True
 ) -> list[dict]:
     """
     Fetch many markets with pagination and deduplicate by event.
@@ -702,10 +704,17 @@ async def get_all_markets_paginated(
     Args:
         target_count: Target number of raw events to fetch (will dedupe after)
         include_spam: Whether to include price prediction spam
+        use_cache: Whether to use Redis cache (default True)
 
     Returns:
         List of unique event dictionaries, sorted by volume desc
     """
+    # Try cache first (only for non-spam filtered requests)
+    if use_cache and not include_spam:
+        cached = await get_cached_markets(target_count)
+        if cached is not None:
+            return cached
+
     # Fetch with pagination
     events = await fetch_events_paginated(
         target_count=target_count,
@@ -769,6 +778,10 @@ async def get_all_markets_paginated(
 
     unique_events = list(event_map.values())
     unique_events.sort(key=lambda x: x["total_volume"], reverse=True)
+
+    # Cache the result for future requests
+    if use_cache and not include_spam:
+        await set_cached_markets(unique_events, target_count)
 
     return unique_events
 
