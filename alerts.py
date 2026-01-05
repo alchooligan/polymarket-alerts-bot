@@ -777,6 +777,32 @@ def _escape_markdown(text: str) -> str:
     return text.replace("[", "\\[").replace("]", "\\]").replace("(", "\\(").replace(")", "\\)").replace("_", "\\_").replace("*", "\\*")
 
 
+def _format_outcome_name(name: str, max_len: int = 15) -> str:
+    """
+    Format an outcome name, adding 'by' prefix for date-based outcomes.
+
+    Examples:
+    - "Mar 31" -> "by Mar 31"
+    - "Jan 6" -> "by Jan 6"
+    - "Tim Cook" -> "Tim Cook"
+    """
+    import re
+
+    # Pattern for date-like outcomes: "Jan 6", "Mar 31", "December 25", etc.
+    date_pattern = r'^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|January|February|March|April|June|July|August|September|October|November|December)\s+\d{1,2}$'
+
+    if re.match(date_pattern, name.strip(), re.IGNORECASE):
+        formatted = f"by {name}"
+    else:
+        formatted = name
+
+    # Truncate if needed
+    if len(formatted) > max_len:
+        formatted = formatted[:max_len-2] + ".."
+
+    return formatted
+
+
 def _format_odds(market: dict) -> str:
     """
     Format odds line based on market outcomes.
@@ -819,13 +845,17 @@ def _format_odds(market: dict) -> str:
             # Not standard yes/no, show as top 2
             top1 = outcomes[0]
             top2 = outcomes[1]
-            return f"{top1['name']} {top1['price']:.0f}% · {top2['name']} {top2['price']:.0f}%"
+            name1 = _format_outcome_name(top1.get('name', ''), 15)
+            name2 = _format_outcome_name(top2.get('name', ''), 15)
+            return f"{name1} {top1['price']:.0f}% · {name2} {top2['price']:.0f}%"
 
     else:
         # Multi-outcome (3+) - show top 2
         top1 = outcomes[0]
         top2 = outcomes[1]
-        return f"Top: {top1['name']} {top1['price']:.0f}% · {top2['name']} {top2['price']:.0f}%"
+        name1 = _format_outcome_name(top1.get('name', ''), 15)
+        name2 = _format_outcome_name(top2.get('name', ''), 15)
+        return f"{name1} {top1['price']:.0f}% · {name2} {top2['price']:.0f}%"
 
 
 def format_market_card(
@@ -2001,7 +2031,7 @@ def format_bundled_wakeups(alerts: list[dict]) -> str:
         # Show outcomes
         if is_multi and event_outcomes:
             sorted_outcomes = sorted(event_outcomes, key=lambda x: x.get("price", 0), reverse=True)[:3]
-            outcome_strs = [f"{o['name'][:15]} {o['price']:.0f}%" for o in sorted_outcomes if o.get("name")]
+            outcome_strs = [f"{_format_outcome_name(o['name'], 15)} {o['price']:.0f}%" for o in sorted_outcomes if o.get("name")]
             if outcome_strs:
                 lines.append(f"Odds: {' · '.join(outcome_strs)}")
         else:
@@ -2053,7 +2083,7 @@ def format_bundled_fast_movers(alerts: list[dict]) -> str:
         # Show top outcomes for multi-outcome markets
         if is_multi and event_outcomes:
             sorted_outcomes = sorted(event_outcomes, key=lambda x: x.get("price", 0), reverse=True)[:3]
-            outcome_strs = [f"{o['name'][:15]} {o['price']:.0f}%" for o in sorted_outcomes if o.get("name")]
+            outcome_strs = [f"{_format_outcome_name(o['name'], 15)} {o['price']:.0f}%" for o in sorted_outcomes if o.get("name")]
             if outcome_strs:
                 lines.append(f"Odds: {' · '.join(outcome_strs)}")
 
@@ -2151,7 +2181,7 @@ def format_bundled_early_heat(alerts: list[dict]) -> str:
         # Show outcomes
         if is_multi and event_outcomes:
             sorted_outcomes = sorted(event_outcomes, key=lambda x: x.get("price", 0), reverse=True)[:3]
-            outcome_strs = [f"{o['name'][:15]} {o['price']:.0f}%" for o in sorted_outcomes if o.get("name")]
+            outcome_strs = [f"{_format_outcome_name(o['name'], 15)} {o['price']:.0f}%" for o in sorted_outcomes if o.get("name")]
             if outcome_strs:
                 lines.append(f"Odds: {' · '.join(outcome_strs)}")
         else:
@@ -2192,7 +2222,7 @@ def format_bundled_new_launches(alerts: list[dict]) -> str:
         # Show outcomes
         if is_multi and event_outcomes:
             sorted_outcomes = sorted(event_outcomes, key=lambda x: x.get("price", 0), reverse=True)[:3]
-            outcome_strs = [f"{o['name'][:15]} {o['price']:.0f}%" for o in sorted_outcomes if o.get("name")]
+            outcome_strs = [f"{_format_outcome_name(o['name'], 15)} {o['price']:.0f}%" for o in sorted_outcomes if o.get("name")]
             if outcome_strs:
                 lines.append(f"Odds: {' · '.join(outcome_strs)}")
             else:

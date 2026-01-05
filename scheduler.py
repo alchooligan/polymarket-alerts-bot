@@ -33,6 +33,9 @@ from database import (
     mark_user_alerted_bulk,
     get_all_watched_markets,
     update_watchlist_price,
+    get_recently_alerted_slugs,
+    mark_channel_alerted_bulk,
+    cleanup_old_channel_alerts,
 )
 from polymarket import get_all_markets_paginated
 from alerts import (
@@ -167,6 +170,14 @@ async def run_alert_cycle(app: Application) -> dict:
     # e.g., same market triggering both Wakeup and Early Heat
     cycle_alerted_slugs = set()
 
+    # For channel mode: also check slugs alerted in PREVIOUS cycles (last 1 hour)
+    # This prevents the same market from triggering different alert types across cycles
+    if use_channel:
+        recently_alerted = get_recently_alerted_slugs(hours=1)
+        cycle_alerted_slugs.update(recently_alerted)
+        if recently_alerted:
+            logger.info(f"Excluding {len(recently_alerted)} recently alerted markets from this cycle")
+
     # ==========================================
     # ALERT 1: Wakeup (was quiet, now hot)
     # ==========================================
@@ -185,7 +196,10 @@ async def run_alert_cycle(app: Application) -> dict:
                     if sent:
                         stats["alerts_sent"] += 1
                         # Track alerted slugs to avoid duplicates in other alert types
-                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        slugs_sent = [m["slug"] for m in to_send]
+                        cycle_alerted_slugs.update(slugs_sent)
+                        # Persist to DB for cross-cycle deduplication
+                        mark_channel_alerted_bulk(slugs_sent, "wakeup")
                 else:
                     # Send to individual users
                     for user in alert_users:
@@ -224,7 +238,9 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "fast_mover_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        slugs_sent = [m["slug"] for m in to_send]
+                        cycle_alerted_slugs.update(slugs_sent)
+                        mark_channel_alerted_bulk(slugs_sent, "fast_mover")
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -262,7 +278,9 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "big_swing_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        slugs_sent = [m["slug"] for m in to_send]
+                        cycle_alerted_slugs.update(slugs_sent)
+                        mark_channel_alerted_bulk(slugs_sent, "big_swing")
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -300,7 +318,9 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "early_heat_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        slugs_sent = [m["slug"] for m in to_send]
+                        cycle_alerted_slugs.update(slugs_sent)
+                        mark_channel_alerted_bulk(slugs_sent, "early_heat")
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -338,7 +358,9 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "new_launch_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        slugs_sent = [m["slug"] for m in to_send]
+                        cycle_alerted_slugs.update(slugs_sent)
+                        mark_channel_alerted_bulk(slugs_sent, "new_launch")
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
