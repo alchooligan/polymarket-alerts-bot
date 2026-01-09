@@ -1264,6 +1264,54 @@ def mark_channel_alerted_bulk(markets: list, alert_type: str) -> None:
     conn.close()
 
 
+def get_digest_markets(hours: int = 12) -> list[dict]:
+    """
+    Get all markets alerted in the last N hours for digest.
+    Returns list of dicts with slug, alert types, prices, volumes, and alert times.
+    Aggregates multiple alert types for the same market.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """SELECT event_slug, alert_type, yes_price, total_volume, alerted_at
+           FROM channel_alerts
+           WHERE alerted_at >= datetime('now', ?)
+           ORDER BY alerted_at DESC""",
+        (f"-{hours} hours",)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    # Aggregate by slug - one market may have triggered multiple alert types
+    markets = {}
+    for row in rows:
+        slug = row["event_slug"]
+        if slug not in markets:
+            markets[slug] = {
+                "slug": slug,
+                "alert_types": [],
+                "yes_price": row["yes_price"] or 0,
+                "total_volume": row["total_volume"] or 0,
+                "first_alerted": row["alerted_at"],
+                "last_alerted": row["alerted_at"],
+                "alert_count": 0,
+            }
+        markets[slug]["alert_types"].append(row["alert_type"])
+        markets[slug]["alert_count"] += 1
+        # Track earliest and latest alert times
+        if row["alerted_at"] < markets[slug]["first_alerted"]:
+            markets[slug]["first_alerted"] = row["alerted_at"]
+        if row["alerted_at"] > markets[slug]["last_alerted"]:
+            markets[slug]["last_alerted"] = row["alerted_at"]
+        # Use the most recent price/volume
+        if row["yes_price"]:
+            markets[slug]["yes_price"] = row["yes_price"]
+        if row["total_volume"]:
+            markets[slug]["total_volume"] = row["total_volume"]
+
+    return list(markets.values())
+
+
 def cleanup_old_channel_alerts(hours: int = 24) -> int:
     """Delete channel alert records older than X hours. Returns count deleted."""
     conn = get_connection()
