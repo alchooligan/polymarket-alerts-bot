@@ -170,10 +170,11 @@ async def run_alert_cycle(app: Application) -> dict:
     # e.g., same market triggering both Wakeup and Early Heat
     cycle_alerted_slugs = set()
 
-    # For channel mode: also check slugs alerted in PREVIOUS cycles (last 1 hour)
+    # For channel mode: also check slugs alerted in PREVIOUS cycles (last 4 hours)
     # This prevents the same market from triggering different alert types across cycles
+    # Extended from 1h to 4h to reduce duplicate alerts for the same story
     if use_channel:
-        recently_alerted = get_recently_alerted_slugs(hours=1)
+        recently_alerted = get_recently_alerted_slugs(hours=4)
         cycle_alerted_slugs.update(recently_alerted)
         if recently_alerted:
             logger.info(f"Excluding {len(recently_alerted)} recently alerted markets from this cycle")

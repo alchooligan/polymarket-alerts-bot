@@ -1674,13 +1674,15 @@ async def check_early_heat_alerts(
     target_count: int = 500,
     max_age_hours: int = 24,
     max_volume: float = 50000,
-    min_velocity_pct: float = 15.0,
+    min_volume: float = 5000,
+    min_velocity_pct: float = 25.0,
 ) -> list[dict]:
     """
     Find new markets that are gaining traction fast.
 
-    Trigger: Created <24h ago AND volume <$50K AND velocity >15%/hr
+    Trigger: Created <24h ago AND $5K <= volume <$50K AND velocity >25%/hr
     This catches markets that are small but growing fast.
+    Minimum volume filter prevents noise from tiny $1-2K markets.
 
     Uses API created_at field directly (not our first_seen_at).
 
@@ -1688,7 +1690,8 @@ async def check_early_heat_alerts(
         target_count: How many markets to fetch
         max_age_hours: Maximum age of market (from API created_at)
         max_volume: Maximum current volume
-        min_velocity_pct: Minimum velocity %/hr
+        min_volume: Minimum volume to filter noise (default $5K)
+        min_velocity_pct: Minimum velocity %/hr (increased to 25% from 15%)
 
     Returns:
         List of early heat markets
@@ -1720,6 +1723,10 @@ async def check_early_heat_alerts(
 
         # Skip if volume too high
         if total_volume > max_volume:
+            continue
+
+        # Skip if volume too low (noise filter)
+        if total_volume < min_volume:
             continue
 
         # Parse creation time from API
@@ -1782,18 +1789,20 @@ async def check_early_heat_alerts(
 async def check_new_launch_alerts(
     target_count: int = 500,
     max_age_hours: int = 3,
+    min_volume: float = 1000,
 ) -> list[dict]:
     """
     Find brand new markets (launched within 3 hours).
 
-    Trigger: created_at <3h ago (from API)
-    This catches new market launches.
+    Trigger: created_at <3h ago (from API) AND volume >= $1K
+    This catches new market launches that have some initial traction.
 
     Uses API created_at field directly (not our first_seen_at).
 
     Args:
         target_count: How many markets to fetch
         max_age_hours: Maximum age (default 3h for reasonable coverage)
+        min_volume: Minimum volume to filter empty launches (default $1K)
 
     Returns:
         List of new markets
@@ -1849,6 +1858,11 @@ async def check_new_launch_alerts(
             continue
 
         total_volume = event.get("total_volume", 0)
+
+        # Skip if volume too low (noise filter for empty launches)
+        if total_volume < min_volume:
+            continue
+
         velocity = deltas_1h.get(slug, 0)
         velocity_pct = (velocity / total_volume * 100) if total_volume > 0 else 0
 
