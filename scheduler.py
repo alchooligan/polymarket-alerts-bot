@@ -34,6 +34,7 @@ from database import (
     get_all_watched_markets,
     update_watchlist_price,
     get_recently_alerted_slugs,
+    get_recently_alerted_with_prices,
     mark_channel_alerted_bulk,
     cleanup_old_channel_alerts,
 )
@@ -170,14 +171,52 @@ async def run_alert_cycle(app: Application) -> dict:
     # e.g., same market triggering both Wakeup and Early Heat
     cycle_alerted_slugs = set()
 
-    # For channel mode: also check slugs alerted in PREVIOUS cycles (last 4 hours)
-    # This prevents the same market from triggering different alert types across cycles
-    # Extended from 1h to 4h to reduce duplicate alerts for the same story
+    # For channel mode: smart deduplication with price change detection
+    # Markets alerted in last 4 hours are blocked UNLESS price moved 20%+ (significant news)
+    recently_alerted_data = {}
     if use_channel:
-        recently_alerted = get_recently_alerted_slugs(hours=4)
-        cycle_alerted_slugs.update(recently_alerted)
-        if recently_alerted:
-            logger.info(f"Excluding {len(recently_alerted)} recently alerted markets from this cycle")
+        recently_alerted_data = get_recently_alerted_with_prices(hours=4)
+        if recently_alerted_data:
+            logger.info(f"Loaded {len(recently_alerted_data)} recently alerted markets for smart dedup")
+
+    def should_filter_market(market: dict) -> bool:
+        """
+        Check if a market should be filtered out.
+        Returns True if market should be BLOCKED, False if it should alert.
+
+        Smart logic:
+        - If not recently alerted: allow (return False)
+        - If recently alerted but price moved 20%+: allow (return False)
+        - If recently alerted and price stable: block (return True)
+        """
+        slug = market.get("slug", "")
+
+        # Already alerted this cycle - always block
+        if slug in cycle_alerted_slugs:
+            return True
+
+        # Check recent alerts from previous cycles
+        if slug not in recently_alerted_data:
+            return False  # Not recently alerted, allow it
+
+        # Was recently alerted - check if price moved significantly
+        old_data = recently_alerted_data[slug]
+        old_price = old_data.get("yes_price", 0)
+        new_price = market.get("yes_price", 0)
+
+        # If we don't have old price data, block it (safety)
+        if old_price == 0:
+            return True
+
+        price_change = abs(new_price - old_price)
+
+        # Allow re-alert if price moved 20%+ (significant development)
+        if price_change >= 20:
+            logger.debug(f"Re-alerting {slug}: price moved {old_price}% -> {new_price}% ({price_change}% change)")
+            return False
+
+        # Price stable, block the duplicate
+        return True
 
     # ==========================================
     # ALERT 1: Wakeup (was quiet, now hot)
@@ -186,6 +225,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking wakeup alerts...")
             wakeups = await check_wakeup_alerts(target_count=MARKETS_TO_SCAN)
+            # Smart filter: block recent alerts unless price moved 20%+
+            wakeups = [m for m in wakeups if not should_filter_market(m)]
             stats["wakeups"] = len(wakeups)
 
             if wakeups:
@@ -197,10 +238,9 @@ async def run_alert_cycle(app: Application) -> dict:
                     if sent:
                         stats["alerts_sent"] += 1
                         # Track alerted slugs to avoid duplicates in other alert types
-                        slugs_sent = [m["slug"] for m in to_send]
-                        cycle_alerted_slugs.update(slugs_sent)
-                        # Persist to DB for cross-cycle deduplication
-                        mark_channel_alerted_bulk(slugs_sent, "wakeup")
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        # Persist to DB with price/volume for smart dedup
+                        mark_channel_alerted_bulk(to_send, "wakeup")
                 else:
                     # Send to individual users
                     for user in alert_users:
@@ -228,8 +268,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking fast mover alerts...")
             movers = await check_fast_mover_alerts(target_count=MARKETS_TO_SCAN)
-            # Filter out markets already alerted this cycle
-            movers = [m for m in movers if m["slug"] not in cycle_alerted_slugs]
+            # Smart filter: block recent alerts unless price moved 20%+
+            movers = [m for m in movers if not should_filter_market(m)]
             stats["fast_movers"] = len(movers)
 
             if movers:
@@ -239,9 +279,8 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "fast_mover_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        slugs_sent = [m["slug"] for m in to_send]
-                        cycle_alerted_slugs.update(slugs_sent)
-                        mark_channel_alerted_bulk(slugs_sent, "fast_mover")
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        mark_channel_alerted_bulk(to_send, "fast_mover")
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -268,8 +307,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking big swing alerts...")
             swings = await check_big_swing_alerts(target_count=MARKETS_TO_SCAN)
-            # Filter out markets already alerted this cycle
-            swings = [m for m in swings if m["slug"] not in cycle_alerted_slugs]
+            # Smart filter: block recent alerts unless price moved 20%+
+            swings = [m for m in swings if not should_filter_market(m)]
             stats["big_swings"] = len(swings)
 
             if swings:
@@ -279,9 +318,8 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "big_swing_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        slugs_sent = [m["slug"] for m in to_send]
-                        cycle_alerted_slugs.update(slugs_sent)
-                        mark_channel_alerted_bulk(slugs_sent, "big_swing")
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        mark_channel_alerted_bulk(to_send, "big_swing")
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -308,8 +346,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking early heat alerts...")
             early = await check_early_heat_alerts(target_count=MARKETS_TO_SCAN)
-            # Filter out markets already alerted this cycle
-            early = [m for m in early if m["slug"] not in cycle_alerted_slugs]
+            # Smart filter: block recent alerts unless price moved 20%+
+            early = [m for m in early if not should_filter_market(m)]
             stats["early_heat"] = len(early)
 
             if early:
@@ -319,9 +357,8 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "early_heat_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        slugs_sent = [m["slug"] for m in to_send]
-                        cycle_alerted_slugs.update(slugs_sent)
-                        mark_channel_alerted_bulk(slugs_sent, "early_heat")
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        mark_channel_alerted_bulk(to_send, "early_heat")
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -348,8 +385,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking new launch alerts...")
             launches = await check_new_launch_alerts(target_count=MARKETS_TO_SCAN)
-            # Filter out markets already alerted this cycle
-            launches = [m for m in launches if m["slug"] not in cycle_alerted_slugs]
+            # Smart filter: block recent alerts unless price moved 20%+
+            launches = [m for m in launches if not should_filter_market(m)]
             stats["new_launches"] = len(launches)
 
             if launches:
@@ -359,9 +396,8 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "new_launch_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        slugs_sent = [m["slug"] for m in to_send]
-                        cycle_alerted_slugs.update(slugs_sent)
-                        mark_channel_alerted_bulk(slugs_sent, "new_launch")
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        mark_channel_alerted_bulk(to_send, "new_launch")
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
