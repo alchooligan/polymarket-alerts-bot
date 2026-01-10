@@ -34,8 +34,12 @@ from database import (
     get_all_watched_markets,
     update_watchlist_price,
     get_recently_alerted_slugs,
+    get_recently_alerted_with_prices,
     mark_channel_alerted_bulk,
     cleanup_old_channel_alerts,
+    get_digest_markets,
+    get_volume_deltas_bulk,
+    get_price_deltas_bulk,
 )
 from polymarket import get_all_markets_paginated
 from alerts import (
@@ -170,13 +174,52 @@ async def run_alert_cycle(app: Application) -> dict:
     # e.g., same market triggering both Wakeup and Early Heat
     cycle_alerted_slugs = set()
 
-    # For channel mode: also check slugs alerted in PREVIOUS cycles (last 1 hour)
-    # This prevents the same market from triggering different alert types across cycles
+    # For channel mode: smart deduplication with price change detection
+    # Markets alerted in last 4 hours are blocked UNLESS price moved 20%+ (significant news)
+    recently_alerted_data = {}
     if use_channel:
-        recently_alerted = get_recently_alerted_slugs(hours=1)
-        cycle_alerted_slugs.update(recently_alerted)
-        if recently_alerted:
-            logger.info(f"Excluding {len(recently_alerted)} recently alerted markets from this cycle")
+        recently_alerted_data = get_recently_alerted_with_prices(hours=4)
+        if recently_alerted_data:
+            logger.info(f"Loaded {len(recently_alerted_data)} recently alerted markets for smart dedup")
+
+    def should_filter_market(market: dict) -> bool:
+        """
+        Check if a market should be filtered out.
+        Returns True if market should be BLOCKED, False if it should alert.
+
+        Smart logic:
+        - If not recently alerted: allow (return False)
+        - If recently alerted but price moved 20%+: allow (return False)
+        - If recently alerted and price stable: block (return True)
+        """
+        slug = market.get("slug", "")
+
+        # Already alerted this cycle - always block
+        if slug in cycle_alerted_slugs:
+            return True
+
+        # Check recent alerts from previous cycles
+        if slug not in recently_alerted_data:
+            return False  # Not recently alerted, allow it
+
+        # Was recently alerted - check if price moved significantly
+        old_data = recently_alerted_data[slug]
+        old_price = old_data.get("yes_price", 0)
+        new_price = market.get("yes_price", 0)
+
+        # If we don't have old price data, block it (safety)
+        if old_price == 0:
+            return True
+
+        price_change = abs(new_price - old_price)
+
+        # Allow re-alert if price moved 20%+ (significant development)
+        if price_change >= 20:
+            logger.debug(f"Re-alerting {slug}: price moved {old_price}% -> {new_price}% ({price_change}% change)")
+            return False
+
+        # Price stable, block the duplicate
+        return True
 
     # ==========================================
     # ALERT 1: Wakeup (was quiet, now hot)
@@ -185,6 +228,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking wakeup alerts...")
             wakeups = await check_wakeup_alerts(target_count=MARKETS_TO_SCAN)
+            # Smart filter: block recent alerts unless price moved 20%+
+            wakeups = [m for m in wakeups if not should_filter_market(m)]
             stats["wakeups"] = len(wakeups)
 
             if wakeups:
@@ -196,10 +241,9 @@ async def run_alert_cycle(app: Application) -> dict:
                     if sent:
                         stats["alerts_sent"] += 1
                         # Track alerted slugs to avoid duplicates in other alert types
-                        slugs_sent = [m["slug"] for m in to_send]
-                        cycle_alerted_slugs.update(slugs_sent)
-                        # Persist to DB for cross-cycle deduplication
-                        mark_channel_alerted_bulk(slugs_sent, "wakeup")
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        # Persist to DB with price/volume for smart dedup
+                        mark_channel_alerted_bulk(to_send, "wakeup")
                 else:
                     # Send to individual users
                     for user in alert_users:
@@ -227,8 +271,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking fast mover alerts...")
             movers = await check_fast_mover_alerts(target_count=MARKETS_TO_SCAN)
-            # Filter out markets already alerted this cycle
-            movers = [m for m in movers if m["slug"] not in cycle_alerted_slugs]
+            # Smart filter: block recent alerts unless price moved 20%+
+            movers = [m for m in movers if not should_filter_market(m)]
             stats["fast_movers"] = len(movers)
 
             if movers:
@@ -238,9 +282,8 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "fast_mover_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        slugs_sent = [m["slug"] for m in to_send]
-                        cycle_alerted_slugs.update(slugs_sent)
-                        mark_channel_alerted_bulk(slugs_sent, "fast_mover")
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        mark_channel_alerted_bulk(to_send, "fast_mover")
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -267,8 +310,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking big swing alerts...")
             swings = await check_big_swing_alerts(target_count=MARKETS_TO_SCAN)
-            # Filter out markets already alerted this cycle
-            swings = [m for m in swings if m["slug"] not in cycle_alerted_slugs]
+            # Smart filter: block recent alerts unless price moved 20%+
+            swings = [m for m in swings if not should_filter_market(m)]
             stats["big_swings"] = len(swings)
 
             if swings:
@@ -278,9 +321,8 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "big_swing_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        slugs_sent = [m["slug"] for m in to_send]
-                        cycle_alerted_slugs.update(slugs_sent)
-                        mark_channel_alerted_bulk(slugs_sent, "big_swing")
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        mark_channel_alerted_bulk(to_send, "big_swing")
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -307,8 +349,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking early heat alerts...")
             early = await check_early_heat_alerts(target_count=MARKETS_TO_SCAN)
-            # Filter out markets already alerted this cycle
-            early = [m for m in early if m["slug"] not in cycle_alerted_slugs]
+            # Smart filter: block recent alerts unless price moved 20%+
+            early = [m for m in early if not should_filter_market(m)]
             stats["early_heat"] = len(early)
 
             if early:
@@ -318,9 +360,8 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "early_heat_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        slugs_sent = [m["slug"] for m in to_send]
-                        cycle_alerted_slugs.update(slugs_sent)
-                        mark_channel_alerted_bulk(slugs_sent, "early_heat")
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        mark_channel_alerted_bulk(to_send, "early_heat")
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -347,8 +388,8 @@ async def run_alert_cycle(app: Application) -> dict:
         try:
             logger.info("Checking new launch alerts...")
             launches = await check_new_launch_alerts(target_count=MARKETS_TO_SCAN)
-            # Filter out markets already alerted this cycle
-            launches = [m for m in launches if m["slug"] not in cycle_alerted_slugs]
+            # Smart filter: block recent alerts unless price moved 20%+
+            launches = [m for m in launches if not should_filter_market(m)]
             stats["new_launches"] = len(launches)
 
             if launches:
@@ -358,9 +399,8 @@ async def run_alert_cycle(app: Application) -> dict:
                     sent = await send_alert_to_channel(app, message, "new_launch_bundle")
                     if sent:
                         stats["alerts_sent"] += 1
-                        slugs_sent = [m["slug"] for m in to_send]
-                        cycle_alerted_slugs.update(slugs_sent)
-                        mark_channel_alerted_bulk(slugs_sent, "new_launch")
+                        cycle_alerted_slugs.update(m["slug"] for m in to_send)
+                        mark_channel_alerted_bulk(to_send, "new_launch")
                 else:
                     for user in alert_users:
                         user_id = user["telegram_id"]
@@ -456,18 +496,18 @@ def start_scheduler(app: Application) -> AsyncIOScheduler:
         replace_existing=True,
     )
 
-    # Add daily digest job (9am UTC)
+    # Add 12h digest job (runs at 8am and 8pm UTC)
     scheduler.add_job(
-        run_daily_digest,
-        trigger=CronTrigger(hour=DAILY_DIGEST_HOUR, minute=DAILY_DIGEST_MINUTE),
+        run_12h_digest,
+        trigger=CronTrigger(hour="8,20", minute=0),
         args=[app],
-        id="daily_digest",
-        name="Daily Digest",
+        id="digest_12h",
+        name="12h Digest",
         replace_existing=True,
     )
 
     scheduler.start()
-    logger.info(f"Scheduler started (V2). Alerts every {CHECK_INTERVAL_MINUTES} min, digest at {DAILY_DIGEST_HOUR}:00 UTC.")
+    logger.info(f"Scheduler started (V2). Alerts every {CHECK_INTERVAL_MINUTES} min, 12h digest at 8am/8pm UTC.")
 
     return scheduler
 
@@ -641,6 +681,168 @@ async def run_daily_digest(app: Application) -> dict:
 
     except Exception as e:
         logger.error(f"Error in daily digest: {e}")
+
+    return stats
+
+
+async def run_12h_digest(app: Application) -> dict:
+    """
+    Send a 12-hour digest summarizing alerted markets.
+    Ranks markets by importance score based on:
+    - Volume (more $ = more serious)
+    - Price change (bigger moves = bigger news)
+    - Velocity (fast money = breaking story)
+    - Alert count (multiple triggers = notable)
+    """
+    from alerts import _escape_markdown
+
+    logger.info("Running 12h digest...")
+
+    stats = {"markets": 0, "sent": False}
+
+    # Check if we're in channel mode
+    if not ALERT_CHANNEL_ID:
+        logger.info("No channel configured for digest")
+        return stats
+
+    try:
+        # Get markets alerted in last 12 hours from our DB
+        alerted_markets = get_digest_markets(hours=12)
+
+        if not alerted_markets:
+            logger.info("No markets alerted in last 12h")
+            return stats
+
+        stats["markets"] = len(alerted_markets)
+
+        # Fetch current market data to get titles and current prices
+        events = await get_all_markets_paginated(target_count=2000, include_spam=False)
+        event_map = {e.get("slug"): e for e in events if e.get("slug")}
+
+        # Get velocity and price change data
+        slugs = [m["slug"] for m in alerted_markets]
+        velocity_data = get_volume_deltas_bulk(slugs, hours=1)
+        price_data_12h = get_price_deltas_bulk(slugs, hours=12)
+
+        # Calculate importance score for each market
+        scored_markets = []
+        for m in alerted_markets:
+            slug = m["slug"]
+            event = event_map.get(slug, {})
+
+            if not event:
+                continue  # Skip if we can't find current data
+
+            title = event.get("title", "Unknown")
+            current_price = event.get("yes_price", m["yes_price"])
+            total_volume = event.get("total_volume", m["total_volume"])
+
+            # Get metrics
+            velocity = velocity_data.get(slug, 0)
+            price_change_data = price_data_12h.get(slug, {})
+            price_change = abs(price_change_data.get("delta", 0))
+
+            # Calculate importance score (0-100 scale)
+            # Volume score: log scale, $10K=20, $100K=40, $1M=60
+            import math
+            vol_score = min(60, max(0, math.log10(max(total_volume, 1)) * 15 - 45))
+
+            # Price change score: 10% = 20, 30% = 40, 50% = 50
+            price_score = min(50, price_change * 1.0)
+
+            # Velocity score: $5K/hr = 15, $20K/hr = 30
+            vel_score = min(30, velocity / 1000 * 3)
+
+            # Alert count bonus: multiple triggers = notable
+            alert_bonus = min(20, (m["alert_count"] - 1) * 10)
+
+            importance = vol_score + price_score + vel_score + alert_bonus
+
+            scored_markets.append({
+                "slug": slug,
+                "title": title,
+                "current_price": current_price,
+                "total_volume": total_volume,
+                "velocity": velocity,
+                "price_change": price_change_data.get("delta", 0),
+                "alert_types": m["alert_types"],
+                "alert_count": m["alert_count"],
+                "importance": importance,
+                "end_date": event.get("end_date"),
+            })
+
+        # Sort by importance
+        scored_markets.sort(key=lambda x: x["importance"], reverse=True)
+
+        # Build digest message
+        lines = ["📊 *12h Digest*", ""]
+
+        if not scored_markets:
+            lines.append("No significant market activity in the last 12 hours.")
+        else:
+            # Show top 10 most important
+            for i, m in enumerate(scored_markets[:10], 1):
+                title = _escape_markdown(m["title"][:45])
+                slug = m["slug"]
+                price = m["current_price"]
+                volume = m["total_volume"]
+                vol_str = f"${volume/1000:.0f}K" if volume < 1_000_000 else f"${volume/1_000_000:.1f}M"
+
+                # Price change indicator
+                pc = m["price_change"]
+                if pc > 0:
+                    change_str = f"↑{pc:.0f}%"
+                elif pc < 0:
+                    change_str = f"↓{abs(pc):.0f}%"
+                else:
+                    change_str = "—"
+
+                # Velocity indicator
+                vel = m["velocity"]
+                if vel >= 10000:
+                    vel_str = f"+${vel/1000:.0f}K/hr"
+                elif vel >= 1000:
+                    vel_str = f"+${vel/1000:.1f}K/hr"
+                else:
+                    vel_str = ""
+
+                # Importance indicator (fire emojis)
+                imp = m["importance"]
+                if imp >= 80:
+                    fire = "🔥🔥🔥"
+                elif imp >= 50:
+                    fire = "🔥🔥"
+                elif imp >= 30:
+                    fire = "🔥"
+                else:
+                    fire = ""
+
+                lines.append(f"*{i}.* [{title}](https://polymarket.com/event/{slug})")
+                lines.append(f"   YES {price:.0f}% | {vol_str} | {change_str} {vel_str} {fire}")
+                lines.append("")
+
+            # Summary footer
+            total = len(scored_markets)
+            if total > 10:
+                lines.append(f"_{total - 10} more markets alerted..._")
+
+        message = "\n".join(lines)
+
+        # Send to channel
+        try:
+            await app.bot.send_message(
+                chat_id=ALERT_CHANNEL_ID,
+                text=message,
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
+            stats["sent"] = True
+            logger.info(f"12h digest sent: {len(scored_markets)} markets")
+        except Exception as e:
+            logger.error(f"Failed to send 12h digest: {e}")
+
+    except Exception as e:
+        logger.error(f"Error in 12h digest: {e}")
 
     return stats
 

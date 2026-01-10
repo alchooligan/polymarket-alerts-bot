@@ -21,7 +21,7 @@ from database import (
     get_recently_seen_slugs,
     get_price_deltas_bulk,
 )
-from scheduler import start_scheduler, stop_scheduler, run_manual_cycle, run_daily_digest, get_scheduler_status
+from scheduler import start_scheduler, stop_scheduler, run_manual_cycle, run_daily_digest, run_12h_digest, get_scheduler_status
 from alerts import (
     check_underdog_alerts,
     format_bundled_underdogs,
@@ -1883,6 +1883,26 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
 
+async def senddigest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin command to manually trigger the 12h digest."""
+    user_id = update.effective_user.id
+
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("This command is admin-only.")
+        return
+
+    await update.message.reply_text("Sending 12h digest to channel...")
+
+    try:
+        stats = await run_12h_digest(context.application)
+        if stats.get("sent"):
+            await update.message.reply_text(f"✅ Digest sent! {stats.get('markets', 0)} markets ranked.")
+        else:
+            await update.message.reply_text(f"No digest sent. Markets found: {stats.get('markets', 0)}")
+    except Exception as e:
+        await update.message.reply_text(f"Error: {e}")
+
+
 async def main() -> None:
     """Start the bot."""
     # Check for token
@@ -1922,6 +1942,7 @@ async def main() -> None:
     application.add_handler(CommandHandler("dbstatus", dbstatus_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("senddigest", senddigest_command))
 
     # Add callback handler for inline buttons
     application.add_handler(CallbackQueryHandler(callback_handler))

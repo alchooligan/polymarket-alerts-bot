@@ -202,14 +202,25 @@ def init_database() -> None:
     # Channel alerts - tracks which markets were alerted in the channel
     # Used to prevent duplicate alerts across different alert types
     # e.g., same market triggering both "Early Heat" and "Wakeup"
+    # Stores price/volume at alert time to allow re-alerting on significant changes
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS channel_alerts (
             event_slug TEXT NOT NULL,
             alert_type TEXT NOT NULL,
             alerted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            yes_price REAL DEFAULT 0,
+            total_volume REAL DEFAULT 0,
             PRIMARY KEY (event_slug, alert_type)
         )
     """)
+
+    # Migration: add price/volume columns if they don't exist
+    cursor.execute("PRAGMA table_info(channel_alerts)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "yes_price" not in columns:
+        cursor.execute("ALTER TABLE channel_alerts ADD COLUMN yes_price REAL DEFAULT 0")
+    if "total_volume" not in columns:
+        cursor.execute("ALTER TABLE channel_alerts ADD COLUMN total_volume REAL DEFAULT 0")
 
     # Index for time-based cleanup
     cursor.execute("""
@@ -1174,6 +1185,34 @@ def get_recently_alerted_slugs(hours: int = 1) -> set[str]:
     return slugs
 
 
+def get_recently_alerted_with_prices(hours: int = 4) -> dict[str, dict]:
+    """
+    Get recently alerted markets with their price/volume at alert time.
+    Returns dict: {slug: {"yes_price": float, "total_volume": float, "alerted_at": str}}
+
+    Used for smart deduplication - allows re-alerting if price moved significantly.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    # Get the most recent alert for each slug (in case same market alerted multiple types)
+    cursor.execute(
+        """SELECT event_slug, yes_price, total_volume, MAX(alerted_at) as alerted_at
+           FROM channel_alerts
+           WHERE alerted_at >= datetime('now', ?)
+           GROUP BY event_slug""",
+        (f"-{hours} hours",)
+    )
+    result = {}
+    for row in cursor.fetchall():
+        result[row["event_slug"]] = {
+            "yes_price": row["yes_price"] or 0,
+            "total_volume": row["total_volume"] or 0,
+            "alerted_at": row["alerted_at"],
+        }
+    conn.close()
+    return result
+
+
 def mark_channel_alerted(event_slug: str, alert_type: str) -> None:
     """Record that a market was alerted in the channel."""
     conn = get_connection()
@@ -1187,20 +1226,90 @@ def mark_channel_alerted(event_slug: str, alert_type: str) -> None:
     conn.close()
 
 
-def mark_channel_alerted_bulk(event_slugs: list[str], alert_type: str) -> None:
-    """Record that multiple markets were alerted in the channel."""
-    if not event_slugs:
+def mark_channel_alerted_bulk(markets: list, alert_type: str) -> None:
+    """
+    Record that multiple markets were alerted in the channel.
+
+    Args:
+        markets: List of market dicts with 'slug', 'yes_price', 'total_volume'
+                 OR list of slug strings (for backwards compatibility)
+        alert_type: The type of alert (wakeup, fast_mover, etc.)
+    """
+    if not markets:
         return
     conn = get_connection()
     cursor = conn.cursor()
-    for slug in event_slugs:
+    for market in markets:
+        if isinstance(market, str):
+            # Backwards compatibility: just a slug string
+            slug = market
+            yes_price = 0
+            total_volume = 0
+        else:
+            # New format: dict with price/volume
+            slug = market.get("slug", "")
+            yes_price = market.get("yes_price", 0)
+            total_volume = market.get("total_volume", 0)
+
+        if not slug:
+            continue
+
         cursor.execute(
-            """INSERT OR REPLACE INTO channel_alerts (event_slug, alert_type, alerted_at)
-               VALUES (?, ?, CURRENT_TIMESTAMP)""",
-            (slug, alert_type)
+            """INSERT OR REPLACE INTO channel_alerts
+               (event_slug, alert_type, alerted_at, yes_price, total_volume)
+               VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?)""",
+            (slug, alert_type, yes_price, total_volume)
         )
     conn.commit()
     conn.close()
+
+
+def get_digest_markets(hours: int = 12) -> list[dict]:
+    """
+    Get all markets alerted in the last N hours for digest.
+    Returns list of dicts with slug, alert types, prices, volumes, and alert times.
+    Aggregates multiple alert types for the same market.
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """SELECT event_slug, alert_type, yes_price, total_volume, alerted_at
+           FROM channel_alerts
+           WHERE alerted_at >= datetime('now', ?)
+           ORDER BY alerted_at DESC""",
+        (f"-{hours} hours",)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    # Aggregate by slug - one market may have triggered multiple alert types
+    markets = {}
+    for row in rows:
+        slug = row["event_slug"]
+        if slug not in markets:
+            markets[slug] = {
+                "slug": slug,
+                "alert_types": [],
+                "yes_price": row["yes_price"] or 0,
+                "total_volume": row["total_volume"] or 0,
+                "first_alerted": row["alerted_at"],
+                "last_alerted": row["alerted_at"],
+                "alert_count": 0,
+            }
+        markets[slug]["alert_types"].append(row["alert_type"])
+        markets[slug]["alert_count"] += 1
+        # Track earliest and latest alert times
+        if row["alerted_at"] < markets[slug]["first_alerted"]:
+            markets[slug]["first_alerted"] = row["alerted_at"]
+        if row["alerted_at"] > markets[slug]["last_alerted"]:
+            markets[slug]["last_alerted"] = row["alerted_at"]
+        # Use the most recent price/volume
+        if row["yes_price"]:
+            markets[slug]["yes_price"] = row["yes_price"]
+        if row["total_volume"]:
+            markets[slug]["total_volume"] = row["total_volume"]
+
+    return list(markets.values())
 
 
 def cleanup_old_channel_alerts(hours: int = 24) -> int:
