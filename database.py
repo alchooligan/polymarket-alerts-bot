@@ -1235,10 +1235,18 @@ def mark_channel_alerted_bulk(markets: list, alert_type: str) -> None:
                  OR list of slug strings (for backwards compatibility)
         alert_type: The type of alert (wakeup, fast_mover, etc.)
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
     if not markets:
+        logger.warning(f"mark_channel_alerted_bulk called with empty markets list for {alert_type}")
         return
+
+    logger.info(f"Storing {len(markets)} markets to channel_alerts for {alert_type}")
+
     conn = get_connection()
     cursor = conn.cursor()
+    stored = 0
     for market in markets:
         if isinstance(market, str):
             # Backwards compatibility: just a slug string
@@ -1260,8 +1268,10 @@ def mark_channel_alerted_bulk(markets: list, alert_type: str) -> None:
                VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?)""",
             (slug, alert_type, yes_price, total_volume)
         )
+        stored += 1
     conn.commit()
     conn.close()
+    logger.info(f"Stored {stored} markets to channel_alerts")
 
 
 def get_digest_markets(hours: int = 12) -> list[dict]:
@@ -1270,8 +1280,17 @@ def get_digest_markets(hours: int = 12) -> list[dict]:
     Returns list of dicts with slug, alert types, prices, volumes, and alert times.
     Aggregates multiple alert types for the same market.
     """
+    import logging
+    logger = logging.getLogger(__name__)
+
     conn = get_connection()
     cursor = conn.cursor()
+
+    # Debug: check total records in table
+    cursor.execute("SELECT COUNT(*) FROM channel_alerts")
+    total = cursor.fetchone()[0]
+    logger.info(f"channel_alerts table has {total} total records")
+
     cursor.execute(
         """SELECT event_slug, alert_type, yes_price, total_volume, alerted_at
            FROM channel_alerts
@@ -1280,6 +1299,7 @@ def get_digest_markets(hours: int = 12) -> list[dict]:
         (f"-{hours} hours",)
     )
     rows = cursor.fetchall()
+    logger.info(f"Found {len(rows)} records in last {hours} hours")
     conn.close()
 
     # Aggregate by slug - one market may have triggered multiple alert types
