@@ -706,18 +706,39 @@ async def run_12h_digest(app: Application) -> dict:
         return stats
 
     try:
-        # Get markets alerted in last 12 hours from our DB
+        # Fetch current market data first
+        events = await get_all_markets_paginated(target_count=2000, include_spam=False)
+        events = filter_noise(events)
+        event_map = {e.get("slug"): e for e in events if e.get("slug")}
+
+        # Try to get markets alerted in last 12 hours from our DB
         alerted_markets = get_digest_markets(hours=12)
 
-        if not alerted_markets:
-            logger.info("No markets alerted in last 12h")
-            return stats
+        # Fallback: if no alerted markets stored, use current hot markets
+        use_fallback = not alerted_markets
+        if use_fallback:
+            logger.info("No alerted markets in DB - falling back to current hot markets")
+            # Create synthetic list from current markets with velocity
+            all_slugs = [e.get("slug") for e in events if e.get("slug")]
+            velocity_all = get_volume_deltas_bulk(all_slugs, hours=1)
+            # Pick markets with velocity > 0, sorted by velocity
+            hot_events = []
+            for e in events:
+                slug = e.get("slug")
+                vel = velocity_all.get(slug, 0)
+                if vel > 1000 and e.get("total_volume", 0) > 10000:  # Min $1K/hr, $10K total
+                    hot_events.append({
+                        "slug": slug,
+                        "alert_types": [],
+                        "alert_count": 0,
+                        "yes_price": e.get("yes_price", 0),
+                        "total_volume": e.get("total_volume", 0),
+                    })
+            # Sort by velocity and take top 20
+            hot_events.sort(key=lambda x: velocity_all.get(x["slug"], 0), reverse=True)
+            alerted_markets = hot_events[:20]
 
         stats["markets"] = len(alerted_markets)
-
-        # Fetch current market data to get titles and current prices
-        events = await get_all_markets_paginated(target_count=2000, include_spam=False)
-        event_map = {e.get("slug"): e for e in events if e.get("slug")}
 
         # Get velocity and price change data
         slugs = [m["slug"] for m in alerted_markets]
@@ -775,10 +796,13 @@ async def run_12h_digest(app: Application) -> dict:
         scored_markets.sort(key=lambda x: x["importance"], reverse=True)
 
         # Build digest message
-        lines = ["📊 *12h Digest*", ""]
+        if use_fallback:
+            lines = ["📊 *Hot Markets Now*", ""]
+        else:
+            lines = ["📊 *12h Digest*", ""]
 
         if not scored_markets:
-            lines.append("No significant market activity in the last 12 hours.")
+            lines.append("No significant market activity.")
         else:
             # Show top 10 most important
             for i, m in enumerate(scored_markets[:10], 1):
